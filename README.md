@@ -1,40 +1,41 @@
-# System Design Implementations & Articles
+# System Design
 
-This repository is dedicated to exploring, implementing, and documenting common system design solutions. The goal is to bridge the gap between theoretical architecture and practical implementation.
+FAANG-level system design interview guides. Each document covers functional requirements, non-functional requirements, back-of-envelope estimation, high-level design, deep dives, and follow-up questions.
 
-## 🎯 Objectives
-- **Practical Implementations**: Build working prototypes of system design components (e.g., Rate Limiters, Distributed Caches, Load Balancers).
-- **In-depth Articles**: Write detailed markdown articles explaining the "why" behind design decisions, trade-offs, and architectural patterns.
-- **Knowledge Base**: Create a searchable and executable reference for system design interviews and real-world engineering.
+## Documents
 
-## 📂 Proposed Structure
-To keep the repository organized, the following structure is used:
+| System | File | Key Topics |
+|--------|------|------------|
+| **TinyURL** | [tiny-url.md](./tiny-url.md) | URL shortening, base62 encoding, Cassandra, Redis cache-aside, 301 vs 302, hash collisions, expiry/TTL, rate limiting |
+| **WhatsApp** | [whatsapp.md](./whatsapp.md) | WebSocket at scale, Signal Protocol (X3DH + Double Ratchet), Kafka fan-out, group messaging, presence, media upload, push notifications, multi-device E2EE |
+| **Parking Garage** | [parking-garage.md](./parking-garage.md) | Spot assignment (Redis atomic queue), offline-capable gate hardware, LPR, IoT sensor pipeline, dynamic pricing, reservations, multi-tenant, fee engine |
+| **Build System** | [build-system.md](./build-system.md) | Git webhook ingestion, pipeline DAG, worker scheduling, Firecracker isolation, log streaming, artifact store, retry system, incremental builds, monorepo change detection |
+| **Job Scheduler** | [job-scheduler.md](./job-scheduler.md) | Cron + one-time jobs, `FOR UPDATE SKIP LOCKED` claim, shard-based scheduling, fencing tokens, outbox pattern, thundering herd, retry backoff, sub-second scheduling, dependency fan-in |
+| **Netflix** | [netflix.md](./netflix.md) | Transcoding pipeline, adaptive bitrate (DASH/HLS), Open Connect CDN, DRM + Widevine, Cassandra watch history, two-tower recommendations, chaos engineering, AV1 codec economics |
+| **Weather App** | [weather-app.md](./weather-app.md) | IoT sensor ingestion (MQTT/Kafka), TimescaleDB time-series, Flink stream aggregation, IDW/Kriging interpolation, S2 cell heat map tiles, geospatial indexing, anomaly detection, alert CEP |
+| **Rate Limiter** | [rate-limiter.md](./rate-limiter.md) | 5 algorithms (Token Bucket, Sliding Window Counter/Log, Fixed Window, Leaky Bucket), multi-dimensional rules, Redis INCR atomicity, distributed quota, fail-open, dynamic rule propagation, GraphQL cost-based limiting |
+| **Uber** | [uber.md](./uber.md) | Ride matching (Redis GEO + distributed lock), driver location at 100K writes/sec, WebSocket real-time tracking, H3 hexagonal surge pricing, trip state machine, Cassandra location history, multi-region city sharding |
+| **Smart Delivery System** | [smart-delivery-system.md](./smart-delivery-system.md) | Choreography Saga (Kafka), atomic inventory reservation (Redis Lua), FC assignment scoring, VRP route optimization (OR-Tools), drone dispatch, real-time tracking (WebSocket + Redis Pub/Sub), SLA breach detection, Symbotic robot integration |
+| **Ticketmaster** | [ticketmaster.md](./ticketmaster.md) | Seat hold (Redis SET NX + Lua atomic multi-seat), virtual queue (14M users, bucket fan-out), seat map read scaling (250K/sec cached), HMAC-signed QR tickets, outbox pattern payments, dynamic pricing, bot prevention, event-sharded PostgreSQL |
+| **Restaurant Reservation** | [restaurant-reservation.md](./restaurant-reservation.md) | Slot modeling (table × time × turn duration), Redis distributed lock (3-phase hold→confirm), two-layer search (Elasticsearch + availability cache), table merging algorithm, waitlist Kafka fan-out, no-show enforcement, real-time floor WebSocket, city-sharded PostgreSQL |
+| **Ad Click Aggregator** | [ad-click-aggregator.md](./ad-click-aggregator.md) | Kappa architecture (Flink + Kafka), 1M events/sec ingestion, event-time windowing, watermarks + late event compensation, hot ad partitioning, Redis HyperLogLog unique users, ClickHouse OLAP (ReplacingMergeTree), bloom filter dedup, exactly-once billing, S3 backfill reprocessing |
+| **Subway Ticket System** | [subway-ticket-system.md](./subway-ticket-system.md) | Payment idempotency (outbox pattern), offline kiosk (EMV floor limit + SQLite sync), HMAC-signed QR tickets (HSM), bloom filter turnstile validation (< 300ms), PCI-DSS isolation, daily financial reconciliation, ticket forgery prevention, Apple/Google Wallet integration |
+| **Elevator System** | [elevator-system.md](./elevator-system.md) | Dual design: LLD (LOOK algorithm, state machine, Strategy/Observer patterns, OOP in Python) + HLD (1M elevator fleet, IoT ingestion via Kafka + Flink, predictive maintenance ML, staged OTA rollout, InfluxDB time-series, technician dispatch) |
+| **Amazon** | [amazon-system-design.md](./amazon-system-design.md) | Microservices catalog (DynamoDB + OpenSearch), cart (Redis HASH + DynamoDB backup), checkout saga with idempotency, PCI DSS payment tokenization (Stripe), inventory reservation (optimistic lock + Redis Lua for flash sales), collaborative filtering recommendations, Kafka notification fan-out, Black Friday scaling, multi-region active-active, GDPR |
+| **Booking.com** | [booking.md](./booking.md) | Hotel search (Elasticsearch + Redis cache 20% hit rate), inventory management (optimistic locking + overbooking 0.05% tolerance), booking saga pattern (async payment reconciliation), dynamic pricing (occupancy/demand/season multipliers), distributed transactions with Saga pattern, anti-fraud review system (ML scoring), 100k QPS search, 10k QPS bookings, 1M+ properties, multi-region deployment, GDPR/CCPA compliance |
+| **GM Car Tracking** | [gm_car_tracking.md](./gm_car_tracking.md) | IoT telemetry ingestion (500k events/sec, MQTT over TLS), multi-region architecture (GDPR/CCPA data residency), OTA updates (staged canary rollout, differential updates, dual partitions), command & control (at-least-once delivery, idempotency, 30s latency), real-time anomaly detection (Kafka Streams + Flink), predictive maintenance ML (XGBoost RUL prediction), time-series data (InfluxDB hot + Glacier archive), security (mutual auth, replay prevention, rate limiting), 10M vehicles, 20M users, 99.99% SLA |
+| **Twitter** | [twitter-system-design.md](./twitter-system-design.md) | Hybrid fan-out (write for normal users, read for celebrities ≥1M followers), Snowflake IDs, Cassandra tweet storage, Redis sorted-set timeline cache (1.28 TB for 200M users), Kafka fan-out pipeline, Earlybird search (near-real-time Elasticsearch), Count-Min Sketch trending (Flink sliding window), S3+CloudFront media (HLS adaptive bitrate), FCM/APNs notifications, algorithmic "For You" timeline (two-tower neural network) |
+| **Instagram** | [instagram-system-design.md](./instagram-system-design.md) | S3 presigned upload (36 GB/s bypassed), multi-tier CDN (868K req/sec, 99% cache hit), hybrid fan-out (celebrity threshold 1M followers), pHash dedup, WebP/AVIF compression, HLS adaptive bitrate video (GPU transcoding cluster), Stories (Redis TTL + S3 lifecycle), Explore two-stage ranking (FAISS ANN + neural ranker), Reels recommendation (two-tower, watch-percentage signal), 2B MAU at 4.56 EB 5-year storage |
+| **YouTube** | [youtube-system-design.md](./youtube-system-design.md) | Transcoding DAG (60 parallel segments per video → 5 min vs hours), multi-codec strategy (H.264/VP9/AV1 — 50% bandwidth savings), DASH adaptive bitrate, Google Global Cache (GGC co-located at ISPs), two-tower DNN recommendation (watch-time regression, not CTR), candidate generation via ScaNN ANN over 800M videos, Content ID fingerprinting (5.76T fingerprints), Bigtable watch history, 500 hrs/min upload → 54 EB 5-year storage |
+| **Google Drive** | [google-drive-system-design.md](./google-drive-system-design.md) | Content-defined chunking (Rabin fingerprinting, avg 4 MB), delta sync (95%+ bandwidth savings on edits), global chunk dedup (SHA-256 content-addressed, 30-50% storage reduction), conflict copy resolution (parent_version_id divergence detection), WebSocket real-time sync (50M concurrent), file versioning as chunk-hash snapshots (not full copies), presigned S3 uploads, Elasticsearch full-text search with permission-aware filtering, async virus scanning, GDPR erasure pipeline |
 
-- `/solutions`: Contains the source code for various system design implementations.
-  - Each solution will have its own subdirectory (e.g., `/solutions/rate-limiter`).
-- `/articles`: Contains markdown files (`.md`) that provide the theoretical background and design documentation for the solutions.
-- `/src`: General utilities and shared logic.
+## Structure
 
-## 🛠️ Getting Started
+Each document follows this format:
 
-### Prerequisites
-- JDK 24
-- Apache Maven
-
-### Building the Project
-```bash
-mvn clean compile
-```
-
-### Running an Implementation
-Since this is a Maven project, you can run specific main classes using:
-```bash
-mvn exec:java -Dexec.mainClass="us.inest.Main"
-```
-*(Replace `us.inest.Main` with the specific class for the solution you are testing)*
-
-## 📝 Contributing
-If you are adding a new system design solution:
-1. Create a new directory in `/solutions`.
-2. Implement the core logic.
-3. Write a corresponding article in `/articles` explaining the design, complexity analysis, and trade-offs.
+1. **Functional Requirements** — core features and explicit out-of-scope boundaries
+2. **Non-Functional Requirements** — availability, latency, consistency, durability, scale targets
+3. **Back-of-Envelope Estimation** — QPS, storage, bandwidth, connection math
+4. **High-Level Design** — architecture diagram, component responsibilities, core API
+5. **Deep Dive** — component-level design decisions with tradeoffs (DB schema, caching strategy, encryption, fan-out models, failure modes)
+6. **Follow-Up Questions** — common interviewer probes with structured answers
