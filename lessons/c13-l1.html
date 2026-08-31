@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WebSockets — Full-Duplex Communication — Grokking System Design</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --brand:       #1F5EFF;
+  --brand-dark:  #1648CC;
+  --brand-light: #EEF4FF;
+  --text-primary:#0F172A;
+  --text-sec:    #475569;
+  --text-muted:  #94A3B8;
+  --border:      #E2E8F0;
+  --bg:          #F8FAFC;
+  --white:       #FFFFFF;
+  --radius:      12px;
+  --code-bg:     #0F172A;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text-primary);
+  line-height: 1.7;
+  min-height: 100vh;
+}
+
+/* ── TOP NAV ──────────────────────────────────────────────── */
+.topnav {
+  background: #fff;
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  box-shadow: 0 1px 4px rgba(0,0,0,.06);
+}
+.topnav-brand {
+  font-weight: 800;
+  font-size: 16px;
+  color: var(--brand);
+  text-decoration: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.topnav-brand span { color: var(--text-primary); }
+.topnav-back {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-sec);
+  text-decoration: none;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  transition: all .15s;
+}
+.topnav-back:hover { background: var(--brand-light); color: var(--brand); border-color: var(--brand); }
+.topnav-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* ── LAYOUT ───────────────────────────────────────────────── */
+.page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 40px 24px 80px;
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 40px;
+  align-items: start;
+}
+@media (max-width: 800px) {
+  .page { grid-template-columns: 1fr; }
+  .lesson-toc { display: none; }
+}
+
+/* ── LEFT: TABLE OF CONTENTS (Chapter lessons) ────────────── */
+.lesson-toc {
+  position: sticky;
+  top: 72px;
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.toc-header {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--text-muted);
+}
+.toc-chapter-title {
+  padding: 12px 16px 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.toc-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 16px;
+  font-size: 13px;
+  color: var(--text-sec);
+  text-decoration: none;
+  border-left: 3px solid transparent;
+  transition: all .1s;
+  line-height: 1.4;
+}
+.toc-item:hover { background: var(--bg); color: var(--brand); }
+.toc-item.active {
+  background: var(--brand-light);
+  color: var(--brand);
+  font-weight: 600;
+  border-left-color: var(--brand);
+}
+.toc-dot {
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 1.5px solid currentColor;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 9px; flex-shrink: 0; margin-top: 1px;
+}
+.toc-item.active .toc-dot {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+}
+
+/* ── RIGHT: MAIN CONTENT ──────────────────────────────────── */
+.lesson-content { min-width: 0; }
+
+.lesson-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+.lesson-breadcrumb a { color: var(--brand); text-decoration: none; }
+.lesson-breadcrumb a:hover { text-decoration: underline; }
+.bc-sep { color: var(--border); }
+
+.lesson-header {
+  margin-bottom: 32px;
+}
+.lesson-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 20px;
+  margin-bottom: 14px;
+  border: 1px solid;
+}
+.lesson-title {
+  font-size: clamp(22px, 4vw, 32px);
+  font-weight: 800;
+  line-height: 1.2;
+  color: var(--text-primary);
+  margin-bottom: 16px;
+}
+.lesson-meta {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.lesson-meta-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.lesson-type-badge {
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .4px;
+}
+.badge-lesson  { background: #EFF6FF; color: #1D4ED8; }
+.badge-quiz    { background: #FEF9C3; color: #A16207; }
+.badge-project { background: #F0FDF4; color: #16A34A; }
+
+/* ── OBJECTIVES BOX ───────────────────────────────────────── */
+.objectives {
+  background: linear-gradient(135deg, #EEF4FF, #F0F9FF);
+  border: 1px solid #BFDBFE;
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  margin-bottom: 32px;
+}
+.objectives h3 {
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--brand);
+  margin-bottom: 12px;
+}
+.objectives ul { list-style: none; }
+.objectives li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 14px;
+  color: var(--text-primary);
+  padding: 4px 0;
+}
+.objectives li::before {
+  content: '✓';
+  color: var(--brand);
+  font-weight: 800;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+/* ── SEPARATOR ────────────────────────────────────────────── */
+.content-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 32px 0;
+}
+
+/* ── ARTICLE BODY ─────────────────────────────────────────── */
+.lesson-body { font-size: 15px; }
+
+.lesson-body h2 {
+  font-size: 22px; font-weight: 700;
+  color: var(--text-primary);
+  margin: 32px 0 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.lesson-body h3 {
+  font-size: 17px; font-weight: 700;
+  color: var(--text-primary);
+  margin: 24px 0 10px;
+}
+.lesson-body h4 {
+  font-size: 15px; font-weight: 600;
+  color: var(--text-primary);
+  margin: 20px 0 8px;
+}
+.lesson-body p  { margin-bottom: 14px; color: var(--text-primary); }
+.lesson-body ul { margin: 12px 0 16px 20px; }
+.lesson-body li { margin-bottom: 6px; }
+
+.lesson-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 18px 0;
+  font-size: 14px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.lesson-body th {
+  background: #F1F5F9;
+  padding: 10px 14px;
+  text-align: left;
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--text-sec);
+  border-bottom: 1px solid var(--border);
+}
+.lesson-body td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.lesson-body tr:last-child td { border-bottom: none; }
+.lesson-body tr:hover td { background: var(--bg); }
+
+.lesson-body pre {
+  background: var(--code-bg);
+  border-radius: 10px;
+  padding: 20px;
+  overflow-x: auto;
+  margin: 16px 0;
+  position: relative;
+}
+.lesson-body code {
+  font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #E2E8F0;
+}
+.lesson-body p code, .lesson-body li code {
+  background: #F1F5F9;
+  color: #C2410C;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.lesson-body blockquote {
+  border-left: 4px solid var(--brand);
+  background: var(--brand-light);
+  padding: 14px 18px;
+  border-radius: 0 8px 8px 0;
+  margin: 18px 0;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.lesson-body strong { font-weight: 700; }
+.lesson-body em { font-style: italic; color: var(--text-sec); }
+.lesson-body hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
+
+/* ── PREV / NEXT NAV ──────────────────────────────────────── */
+.lesson-nav {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 48px;
+  padding-top: 32px;
+  border-top: 1px solid var(--border);
+}
+.nav-card {
+  display: flex;
+  flex-direction: column;
+  padding: 16px 20px;
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  text-decoration: none;
+  color: inherit;
+  transition: all .15s;
+  min-width: 0;
+}
+.nav-card:hover {
+  border-color: var(--brand);
+  box-shadow: 0 4px 14px rgba(31,94,255,.12);
+}
+.nav-card.next { text-align: right; }
+.nav-card.empty { visibility: hidden; }
+.nav-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.nav-card.next .nav-label { justify-content: flex-end; }
+.nav-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.nav-chapter {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── MARK COMPLETE ────────────────────────────────────────── */
+.complete-bar {
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  margin-top: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.complete-bar p {
+  font-size: 14px;
+  color: var(--text-sec);
+  margin: 0;
+}
+.complete-btn {
+  padding: 10px 22px;
+  background: #16A34A;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background .15s;
+  white-space: nowrap;
+}
+.complete-btn:hover { background: #15803D; }
+.complete-btn.done {
+  background: #F0FDF4;
+  color: #16A34A;
+  border: 1.5px solid #BBF7D0;
+  cursor: default;
+}
+</style>
+</head>
+<body>
+
+<!-- ─── TOP NAV ───────────────────────────────────────────────────── -->
+<nav class="topnav">
+  <a class="topnav-brand" href="../index.php">
+    📐 <span>Grokking System Design</span>
+  </a>
+  <div class="topnav-progress">
+    Lesson 2 of 3 in this chapter
+  </div>
+  <a class="topnav-back" href="../index.php">← Back to Roadmap</a>
+</nav>
+
+<!-- ─── PAGE LAYOUT ───────────────────────────────────────────────── -->
+<div class="page">
+
+  <!-- LEFT: CHAPTER TOC ─────────────────────────────────────────── -->
+  <aside class="lesson-toc">
+    <div class="toc-header">Chapter 13</div>
+    <div class="toc-chapter-title">
+      📡 Long-Polling, WebSockets &amp; SSE    </div>
+        <a class="toc-item "
+       href="c13-l0.html">
+      <div class="toc-dot">▶</div>
+      <span>AJAX Polling vs Long-Polling</span>
+    </a>
+        <a class="toc-item active"
+       href="c13-l1.html">
+      <div class="toc-dot">✓</div>
+      <span>WebSockets — Full-Duplex Communication</span>
+    </a>
+        <a class="toc-item "
+       href="c13-l2.html">
+      <div class="toc-dot">▶</div>
+      <span>Server-Sent Events (SSE)</span>
+    </a>
+      </aside>
+
+  <!-- RIGHT: LESSON CONTENT ─────────────────────────────────────── -->
+  <main class="lesson-content">
+
+    <!-- Breadcrumb -->
+    <div class="lesson-breadcrumb">
+      <a href="../index.php">Roadmap</a>
+      <span class="bc-sep">›</span>
+      <span>Long-Polling, WebSockets &amp; SSE</span>
+      <span class="bc-sep">›</span>
+      <span>WebSockets — Full-Duplex Communication</span>
+    </div>
+
+    <!-- Lesson Header -->
+    <div class="lesson-header">
+      <div class="lesson-tag" style="background:#FFF7ED;color:#C2410C;border-color:#FED7AA">
+        📡 Advanced Concepts      </div>
+      <h1 class="lesson-title">WebSockets — Full-Duplex Communication</h1>
+      <div class="lesson-meta">
+        <div class="lesson-meta-item">
+          <span class="lesson-type-badge badge-lesson">lesson</span>
+        </div>
+        <div class="lesson-meta-item">⏱ 8 min</div>
+        <div class="lesson-meta-item">📖 Chapter 13, Lesson 2</div>
+      </div>
+    </div>
+
+    <!-- Learning Objectives -->
+    <div class="objectives">
+      <h3>🎯 Learning Objectives</h3>
+      <ul>
+                <li>Explain the HTTP upgrade handshake and WebSocket frame format</li>
+                <li>Describe how to scale WebSocket connections horizontally with a message broker</li>
+                <li>Identify which FAANG products use WebSockets and why</li>
+              </ul>
+    </div>
+
+    <div class="content-divider"></div>
+
+    <!-- Lesson Body -->
+    <article class="lesson-body">
+      <h2>WebSockets: Full-Duplex Communication</h2><p>HTTP/1.1 is half-duplex. WebSockets upgrade HTTP to a <strong>persistent, full-duplex, low-overhead</strong> channel — either side can send a message at any time.</p><h2>The Upgrade Handshake</h2><pre><code>Client to Server:
+  GET /ws HTTP/1.1
+  Host: chat.example.com
+  Upgrade: websocket
+  Connection: Upgrade
+  Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+  Sec-WebSocket-Version: 13
+
+Server to Client:
+  HTTP/1.1 101 Switching Protocols
+  Upgrade: websocket
+  Connection: Upgrade
+  Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=</code></pre><p>After the 101, the TCP connection is re-used for WebSocket framing — no more HTTP overhead.</p><h2>WebSocket Frame Format</h2><pre><code>  0                   1                   2                   3
+  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+ ├─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┼─┤
+ │F│R│R│R│ opcode  │M│    Payload len    │  Extended length        │
+ │I│S│S│S│         │A│                   │  (if len = 126 or 127)  │
+ │N│V│V│V│         │S│                   │                         │
+ └─┴─┴─┴─┴─────────┴─┴───────────────────┴─────────────────────────┘</code></pre><ul><li><strong>Overhead per message:</strong> 2-10 bytes (vs HTTP: 500-800 bytes header overhead)</li><li><strong>Opcodes:</strong> 0x1 text, 0x2 binary, 0x8 close, 0x9 ping, 0xA pong</li></ul><h2>Scaling WebSockets Horizontally</h2><p><strong>The problem:</strong> WebSocket connections are stateful. A user&#039;s connection lives on server-1. If that user&#039;s message must reach a user on server-3, server-1 must know about it.</p><p><strong>Solution: Pub/Sub message broker (Redis or Kafka)</strong></p><pre><code>User A ──WS──► WS-Server-1 ──pub──► Redis Pub/Sub ──sub──► WS-Server-2 ──WS──► User B
+                    │                      │                      │
+                    └──────────────────────┴──────────────────────┘
+                          All servers subscribe to all rooms/channels</code></pre><p><strong>Implementation (Node.js + Redis):</strong></p><pre><code>const sub = redis.createClient();
+
+wss.on(&#039;connection&#039;, (ws, req) =&gt; {
+    const userId = getUserId(req);
+    connections.set(userId, ws);
+
+    sub.subscribe(`user:${userId}`, (message) =&gt; {
+        ws.send(message);
+    });
+});
+
+async function sendToUser(userId, data) {
+    await pub.publish(`user:${userId}`, JSON.stringify(data));
+}</code></pre><h2>Connection Lifecycle with Heartbeat</h2><pre><code>Client              WS Server
+  │                     │
+  │──── ping ──────────►│ (every 30s)
+  │◄─── pong ───────────│
+  │                     │
+  │ (no pong for 60s)   │
+  │◄─── close frame ────│ (server closes dead connection)
+  │──── reconnect ──────►│</code></pre><h2>WebSocket at FAANG Scale</h2><table><tr><th>Product</th><th>Use Case</th><th>Scale</th></tr><tr><td><strong>Discord</strong></td><td>Real-time chat, voice signaling</td><td>15M+ concurrent WS connections per gateway cluster</td></tr><tr><td><strong>Slack</strong></td><td>Message delivery, presence, typing</td><td>Per-workspace WS connections</td></tr><tr><td><strong>Google Docs</strong></td><td>Collaborative editing (OT/CRDT)</td><td>Document-scoped WS rooms</td></tr><tr><td><strong>Robinhood</strong></td><td>Live stock price ticks</td><td>Per-symbol subscriptions</td></tr><tr><td><strong>Figma</strong></td><td>Multi-user cursor and shape updates</td><td>CRDT synced over WebSockets</td></tr><tr><td><strong>Twitch</strong></td><td>Chat messages, viewer counts</td><td>Sharded by channel</td></tr></table><blockquote>💡 <strong>FAANG tip:</strong> When designing a chat system or live trading platform, propose WebSockets over Redis Pub/Sub. Mention: (1) sticky sessions vs pub/sub tradeoff, (2) heartbeat/ping-pong for connection health, (3) Kafka for durable message history, and (4) sequence numbers for reconnect without missing messages.</blockquote>    </article>
+
+    <!-- Mark Complete -->
+    <div class="complete-bar">
+      <p>Ready to move on? Mark this lesson complete to track your progress.</p>
+      <button class="complete-btn" id="completeBtn" onclick="markComplete()">
+        ✓ Mark as Complete
+      </button>
+    </div>
+
+    <!-- Prev / Next -->
+    <nav class="lesson-nav">
+                  <a class="nav-card prev" href="c13-l0.html">
+        <div class="nav-label">← Previous</div>
+        <div class="nav-title">AJAX Polling vs Long-Polling</div>
+        <div class="nav-chapter">Long-Polling, WebSockets &amp; SSE</div>
+      </a>
+      
+                  <a class="nav-card next" href="c13-l2.html">
+        <div class="nav-label">Next →</div>
+        <div class="nav-title">Server-Sent Events (SSE)</div>
+        <div class="nav-chapter">Long-Polling, WebSockets &amp; SSE</div>
+      </a>
+          </nav>
+
+  </main>
+</div>
+
+<script>
+function markComplete() {
+  const btn = document.getElementById('completeBtn');
+  btn.textContent = '✓ Completed!';
+  btn.classList.add('done');
+  // In a real app: AJAX call to save progress
+}
+
+// Keyboard navigation
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.key === 'ArrowLeft') window.location = 'lesson.php?c=13&l=0';
+      if (e.key === 'ArrowRight') window.location = 'lesson.php?c=13&l=2';
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,794 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Deep Dive — Search, Replication &amp; Sharding — Grokking System Design</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --brand:       #1F5EFF;
+  --brand-dark:  #1648CC;
+  --brand-light: #EEF4FF;
+  --text-primary:#0F172A;
+  --text-sec:    #475569;
+  --text-muted:  #94A3B8;
+  --border:      #E2E8F0;
+  --bg:          #F8FAFC;
+  --white:       #FFFFFF;
+  --radius:      12px;
+  --code-bg:     #0F172A;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text-primary);
+  line-height: 1.7;
+  min-height: 100vh;
+}
+
+/* ── TOP NAV ──────────────────────────────────────────────── */
+.topnav {
+  background: #fff;
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  box-shadow: 0 1px 4px rgba(0,0,0,.06);
+}
+.topnav-brand {
+  font-weight: 800;
+  font-size: 16px;
+  color: var(--brand);
+  text-decoration: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.topnav-brand span { color: var(--text-primary); }
+.topnav-back {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-sec);
+  text-decoration: none;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  transition: all .15s;
+}
+.topnav-back:hover { background: var(--brand-light); color: var(--brand); border-color: var(--brand); }
+.topnav-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* ── LAYOUT ───────────────────────────────────────────────── */
+.page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 40px 24px 80px;
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 40px;
+  align-items: start;
+}
+@media (max-width: 800px) {
+  .page { grid-template-columns: 1fr; }
+  .lesson-toc { display: none; }
+}
+
+/* ── LEFT: TABLE OF CONTENTS (Chapter lessons) ────────────── */
+.lesson-toc {
+  position: sticky;
+  top: 72px;
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.toc-header {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--text-muted);
+}
+.toc-chapter-title {
+  padding: 12px 16px 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.toc-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 16px;
+  font-size: 13px;
+  color: var(--text-sec);
+  text-decoration: none;
+  border-left: 3px solid transparent;
+  transition: all .1s;
+  line-height: 1.4;
+}
+.toc-item:hover { background: var(--bg); color: var(--brand); }
+.toc-item.active {
+  background: var(--brand-light);
+  color: var(--brand);
+  font-weight: 600;
+  border-left-color: var(--brand);
+}
+.toc-dot {
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 1.5px solid currentColor;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 9px; flex-shrink: 0; margin-top: 1px;
+}
+.toc-item.active .toc-dot {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+}
+
+/* ── RIGHT: MAIN CONTENT ──────────────────────────────────── */
+.lesson-content { min-width: 0; }
+
+.lesson-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+.lesson-breadcrumb a { color: var(--brand); text-decoration: none; }
+.lesson-breadcrumb a:hover { text-decoration: underline; }
+.bc-sep { color: var(--border); }
+
+.lesson-header {
+  margin-bottom: 32px;
+}
+.lesson-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 20px;
+  margin-bottom: 14px;
+  border: 1px solid;
+}
+.lesson-title {
+  font-size: clamp(22px, 4vw, 32px);
+  font-weight: 800;
+  line-height: 1.2;
+  color: var(--text-primary);
+  margin-bottom: 16px;
+}
+.lesson-meta {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.lesson-meta-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.lesson-type-badge {
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .4px;
+}
+.badge-lesson  { background: #EFF6FF; color: #1D4ED8; }
+.badge-quiz    { background: #FEF9C3; color: #A16207; }
+.badge-project { background: #F0FDF4; color: #16A34A; }
+
+/* ── OBJECTIVES BOX ───────────────────────────────────────── */
+.objectives {
+  background: linear-gradient(135deg, #EEF4FF, #F0F9FF);
+  border: 1px solid #BFDBFE;
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  margin-bottom: 32px;
+}
+.objectives h3 {
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--brand);
+  margin-bottom: 12px;
+}
+.objectives ul { list-style: none; }
+.objectives li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 14px;
+  color: var(--text-primary);
+  padding: 4px 0;
+}
+.objectives li::before {
+  content: '✓';
+  color: var(--brand);
+  font-weight: 800;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+/* ── SEPARATOR ────────────────────────────────────────────── */
+.content-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 32px 0;
+}
+
+/* ── ARTICLE BODY ─────────────────────────────────────────── */
+.lesson-body { font-size: 15px; }
+
+.lesson-body h2 {
+  font-size: 22px; font-weight: 700;
+  color: var(--text-primary);
+  margin: 32px 0 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.lesson-body h3 {
+  font-size: 17px; font-weight: 700;
+  color: var(--text-primary);
+  margin: 24px 0 10px;
+}
+.lesson-body h4 {
+  font-size: 15px; font-weight: 600;
+  color: var(--text-primary);
+  margin: 20px 0 8px;
+}
+.lesson-body p  { margin-bottom: 14px; color: var(--text-primary); }
+.lesson-body ul { margin: 12px 0 16px 20px; }
+.lesson-body li { margin-bottom: 6px; }
+
+.lesson-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 18px 0;
+  font-size: 14px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.lesson-body th {
+  background: #F1F5F9;
+  padding: 10px 14px;
+  text-align: left;
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--text-sec);
+  border-bottom: 1px solid var(--border);
+}
+.lesson-body td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.lesson-body tr:last-child td { border-bottom: none; }
+.lesson-body tr:hover td { background: var(--bg); }
+
+.lesson-body pre {
+  background: var(--code-bg);
+  border-radius: 10px;
+  padding: 20px;
+  overflow-x: auto;
+  margin: 16px 0;
+  position: relative;
+}
+.lesson-body code {
+  font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #E2E8F0;
+}
+.lesson-body p code, .lesson-body li code {
+  background: #F1F5F9;
+  color: #C2410C;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.lesson-body blockquote {
+  border-left: 4px solid var(--brand);
+  background: var(--brand-light);
+  padding: 14px 18px;
+  border-radius: 0 8px 8px 0;
+  margin: 18px 0;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.lesson-body strong { font-weight: 700; }
+.lesson-body em { font-style: italic; color: var(--text-sec); }
+.lesson-body hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
+
+/* ── PREV / NEXT NAV ──────────────────────────────────────── */
+.lesson-nav {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 48px;
+  padding-top: 32px;
+  border-top: 1px solid var(--border);
+}
+.nav-card {
+  display: flex;
+  flex-direction: column;
+  padding: 16px 20px;
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  text-decoration: none;
+  color: inherit;
+  transition: all .15s;
+  min-width: 0;
+}
+.nav-card:hover {
+  border-color: var(--brand);
+  box-shadow: 0 4px 14px rgba(31,94,255,.12);
+}
+.nav-card.next { text-align: right; }
+.nav-card.empty { visibility: hidden; }
+.nav-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.nav-card.next .nav-label { justify-content: flex-end; }
+.nav-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.nav-chapter {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── MARK COMPLETE ────────────────────────────────────────── */
+.complete-bar {
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  margin-top: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.complete-bar p {
+  font-size: 14px;
+  color: var(--text-sec);
+  margin: 0;
+}
+.complete-btn {
+  padding: 10px 22px;
+  background: #16A34A;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background .15s;
+  white-space: nowrap;
+}
+.complete-btn:hover { background: #15803D; }
+.complete-btn.done {
+  background: #F0FDF4;
+  color: #16A34A;
+  border: 1.5px solid #BBF7D0;
+  cursor: default;
+}
+</style>
+</head>
+<body>
+
+<!-- ─── TOP NAV ───────────────────────────────────────────────────── -->
+<nav class="topnav">
+  <a class="topnav-brand" href="../index.php">
+    📐 <span>Grokking System Design</span>
+  </a>
+  <div class="topnav-progress">
+    Lesson 4 of 4 in this chapter
+  </div>
+  <a class="topnav-back" href="../index.php">← Back to Roadmap</a>
+</nav>
+
+<!-- ─── PAGE LAYOUT ───────────────────────────────────────────────── -->
+<div class="page">
+
+  <!-- LEFT: CHAPTER TOC ─────────────────────────────────────────── -->
+  <aside class="lesson-toc">
+    <div class="toc-header">Chapter 21</div>
+    <div class="toc-chapter-title">
+      🐦 Design Twitter    </div>
+        <a class="toc-item "
+       href="c21-l0.html">
+      <div class="toc-dot">▶</div>
+      <span>Requirements &amp; Estimations</span>
+    </a>
+        <a class="toc-item "
+       href="c21-l1.html">
+      <div class="toc-dot">▶</div>
+      <span>High-Level Design &amp; Tweet Storage</span>
+    </a>
+        <a class="toc-item "
+       href="c21-l2.html">
+      <div class="toc-dot">▶</div>
+      <span>Deep Dive — Timeline Generation (Fan-out)</span>
+    </a>
+        <a class="toc-item active"
+       href="c21-l3.html">
+      <div class="toc-dot">✓</div>
+      <span>Deep Dive — Search, Replication &amp; Sharding</span>
+    </a>
+      </aside>
+
+  <!-- RIGHT: LESSON CONTENT ─────────────────────────────────────── -->
+  <main class="lesson-content">
+
+    <!-- Breadcrumb -->
+    <div class="lesson-breadcrumb">
+      <a href="../index.php">Roadmap</a>
+      <span class="bc-sep">›</span>
+      <span>Design Twitter</span>
+      <span class="bc-sep">›</span>
+      <span>Deep Dive — Search, Replication &amp; Sharding</span>
+    </div>
+
+    <!-- Lesson Header -->
+    <div class="lesson-header">
+      <div class="lesson-tag" style="background:#EFF6FF;color:#1D4ED8;border-color:#BFDBFE">
+        🐦 Design Problems      </div>
+      <h1 class="lesson-title">Deep Dive — Search, Replication &amp; Sharding</h1>
+      <div class="lesson-meta">
+        <div class="lesson-meta-item">
+          <span class="lesson-type-badge badge-lesson">lesson</span>
+        </div>
+        <div class="lesson-meta-item">⏱ 12 min</div>
+        <div class="lesson-meta-item">📖 Chapter 21, Lesson 4</div>
+      </div>
+    </div>
+
+    <!-- Learning Objectives -->
+    <div class="objectives">
+      <h3>🎯 Learning Objectives</h3>
+      <ul>
+                <li>Explain Twitter's Earlybird near-real-time search: time-based index sharding, 15-second indexing lag, and why time-sharding enables efficient GDPR erasure</li>
+                <li>Design like-count storage using Redis INCR with a 60-second Cassandra flush — and calculate why this is the only viable approach at 57,870 likes/sec</li>
+                <li>Shard the Cassandra tweet store by user_id and explain the hot-partition problem for celebrities + the mitigation (virtual nodes, prefix salting)</li>
+                <li>Build the consistency model matrix for all Twitter operations and justify the strong-consistency requirement for follow/unfollow vs. eventual for timelines</li>
+              </ul>
+    </div>
+
+    <div class="content-divider"></div>
+
+    <!-- Lesson Body -->
+    <article class="lesson-body">
+
+<h2>1. Near-Real-Time Search — Earlybird Architecture</h2>
+
+<p>Twitter's Earlybird (internal name) is an Elasticsearch-based near-real-time index that makes tweets searchable within 15 seconds of posting. Standard Elasticsearch refresh is 1 second but propagation to replicas + query routing adds up; optimizing for 15s end-to-end requires specific tuning.</p>
+
+<h3>Time-Based Index Sharding</h3>
+<pre><code>Standard approach: shard by tweet_id hash → tweets distributed randomly across shards
+Problem: a search for "#WorldCup" in the last 24 hours must query ALL shards (scatter-gather)
+
+Twitter's approach: shard by TIME (time-based index rolling):
+  Index "tweets-2024-08-30" contains all tweets from 2024-08-30
+  Index "tweets-2024-08-29" contains all tweets from 2024-08-29
+  ...
+  Hot index: tweets from last 7 days → kept in SSD-backed nodes (high IOPS)
+  Warm index: tweets 7d–90d → HDD-backed nodes (lower IOPS acceptable)
+  Cold index: tweets &gt; 90d → S3-backed or archived (rarely searched)
+
+Benefits of time-sharding:
+  1. Recency search ("recent" result_type): query only today's + yesterday's index → 2 shards, not all
+  2. Date-range search: skip irrelevant time shards entirely (partition pruning)
+  3. GDPR delete: delete entire day's index if user's tweet is there → O(1) deletion vs O(N) per-tweet delete
+  4. TTL management: drop old index files by date without per-document GC
+</code></pre>
+
+<h3>Near-Real-Time Indexing Pipeline</h3>
+<pre><code>Kafka topic: tweet-events → Elasticsearch Indexer consumer group
+
+Per-tweet indexing:
+  Elasticsearch document:
+  {
+    "tweet_id": 8675309,
+    "user_id": 42,
+    "content": "Hello world! #hello",
+    "hashtags": ["hello"],
+    "mentions": [],
+    "lang": "en",
+    "created_at": "2024-08-30T10:00:00Z",
+    "like_count": 0,
+    "retweet_count": 0,
+    "is_verified": false,
+    "follower_count": 5000    -- for ranking (verified/popular users ranked higher)
+  }
+
+Refresh interval: index.refresh_interval = "5s"
+  → New tweets visible to search within 5s of indexing
+  → End-to-end: Kafka lag (1s) + indexer processing (2s) + refresh (5s) + replica propagation (7s) ≈ 15s
+
+Search query example:
+  GET /tweets-*/_search   ← query all time-sharded indices (or date-range filtered)
+  {
+    "query": {
+      "bool": {
+        "must": [{"match": {"content": "World Cup"}}],
+        "filter": [
+          {"term": {"lang": "en"}},
+          {"range": {"created_at": {"gte": "now-24h"}}}
+        ]
+      }
+    },
+    "sort": [
+      {"_score": "desc"},
+      {"created_at": "desc"}
+    ]
+  }
+</code></pre>
+
+<h3>GDPR Delete via Time Shard</h3>
+<pre><code>Problem: user requests erasure → must delete all their tweets from search index.
+         Standard: DELETE BY QUERY {user_id: X} → O(N) document scans across all shards.
+         At 500M users × avg 1,000 tweets = 500B documents to potentially scan.
+
+Time-shard solution:
+  SELECT created_at FROM tweets WHERE user_id = X → list of tweet dates
+  For each date: DELETE FROM tweets-{date} WHERE user_id = X (scoped to 1 time shard)
+  → Still per-document, but within bounded time shards (much smaller scan)
+
+Nuclear option (if legally required fast erasure):
+  For accounts with many tweets in an old time shard:
+  Mark tweets in a deletion bitmap → filter at query time (pseudo-delete)
+  Nightly job: reindex shard without deleted tweets → clean shard
+  Within 24 hours: tweet disappears from search permanently
+</code></pre>
+
+<h2>2. Like Count — Redis INCR + Cassandra Flush</h2>
+
+<pre><code>Scale: 57,870 likes/sec (500M users × 10 likes/day ÷ 86,400)
+
+Option A — PostgreSQL row update:
+  UPDATE tweets SET like_count = like_count + 1 WHERE tweet_id = ?
+  Throughput: ~5,000 writes/sec per node (MVCC + WAL + index update)
+  Nodes needed: 57,870 ÷ 5,000 = 12 PostgreSQL nodes
+  Problem: hot tweets (viral posts) all update same row → single-row lock contention
+           Single viral tweet at 10K likes/sec → 1 row holding back ALL 12 nodes
+
+Option B — Redis INCR (correct approach):
+  INCR like_count:{tweet_id}
+  INCR is atomic, O(1), lock-free at the Redis hash slot level
+  Redis throughput: ~1M INCR/sec per node (vs 5K for PostgreSQL)
+  Nodes needed: 57,870 ÷ 1M = &lt;1 node (easy!)
+
+  Periodic flush to Cassandra (every 60 seconds):
+    -- Cassandra like_counts table (separate from tweets to avoid COUNTER quirks)
+    CREATE TABLE like_counts (
+        tweet_id  BIGINT  PRIMARY KEY,
+        count     BIGINT
+    );
+
+    Flush job:
+      keys = redis.scan("like_count:*")
+      for tweet_id, count in batch_mget(keys):
+        cassandra.execute("UPDATE like_counts SET count = count + ? WHERE tweet_id = ?",
+                          [count, tweet_id])
+        redis.decr(f"like_count:{tweet_id}", count)   -- subtract flushed amount atomically
+      -- Note: DECR not DELETE because new likes may arrive during flush window
+
+  Flush math:
+    57,870 likes/sec × 60s = 3.47M likes accumulated per flush interval
+    Cassandra write throughput: 50K writes/sec → 3.47M ÷ 50K = 70 seconds to flush
+    → Overlap between windows: use 2 flush workers alternating 60s windows
+
+  Cache consistency:
+    READ like_count: MGET like_count:{tweet_id} (Redis, real-time) + cassandra fallback if key expired
+    Tweet hydration: Redis like_count + Cassandra stored count are eventually merged (TTL reconciliation)
+</code></pre>
+
+<h2>3. Cassandra Sharding — Hot Partition Problem</h2>
+
+<pre><code>Cassandra partitioning: partition key hashed via Murmur3 → assigned to a virtual node (vnode).
+For the tweets table: partition key = tweet_id (Snowflake ID).
+
+Problem with celebrity accounts:
+  Katy Perry (user_id = 42) posts 20 tweets/day.
+  All her tweets have tweet_ids that hash to different vnodes (good — tweet_id is globally distributed).
+  But: user_tweets table partition key = user_id (42).
+  → ALL of Katy Perry's 20 tweets/day write to the SAME partition on the SAME node.
+  → 200M fans read her user timeline → all reads hit the same Cassandra node = HOT PARTITION.
+
+Mitigations:
+
+  1. Vnode replication factor (already built in to Cassandra):
+     replication_factor = 3 → 3 copies of each partition across 3 nodes
+     Read: any of 3 replicas can serve → distributes read load 3×
+
+  2. Application-level read replicas (additional):
+     Cassandra read consistency = LOCAL_ONE (reads from nearest replica)
+     + Redis cache in front of Cassandra (celebrity timelines cached in Redis, TTL=60s)
+     → 95%+ cache hit rate for celebrity timelines → Cassandra barely touched
+
+  3. Prefix salting (for extreme cases):
+     user_tweets partition key = (user_id % NUM_SALT_BUCKETS, user_id)
+     NUM_SALT_BUCKETS = 10 for celebrities
+     Spread one user's timeline across 10 partitions → 10× read throughput
+     Cost: scatter-gather 10 partitions at read time → merge-sort
+
+Tweets table sharding (tweet_id as PK):
+  tweet_id = Snowflake → Murmur3(tweet_id) distributes uniformly across vnodes
+  No hot partition risk: every tweet on a different node
+  Read for single tweet: O(1) — direct hash lookup
+</code></pre>
+
+<h2>4. Multi-Region Architecture</h2>
+
+<pre><code>Twitter regions: US-East, US-West, EU-West, AP-Southeast, AP-Northeast (5 active regions)
+
+Cassandra multi-datacenter replication:
+  NetworkTopologyStrategy: replication_factor = 3 per datacenter
+  Total replicas per row: 3 × 5 DCs = 15 copies globally (99.9999% durability)
+  Write consistency: LOCAL_QUORUM (2 of 3 in local DC must ACK before success)
+  Read consistency: LOCAL_ONE (nearest replica, lowest latency)
+
+Why LOCAL_QUORUM for writes (not QUORUM):
+  QUORUM requires acks from majority of ALL DCs → cross-region latency (100–200ms)
+  LOCAL_QUORUM: acks from local DC only → &lt; 5ms write latency
+  Trade-off: if local DC fails before cross-DC replication, up to 1 write window of data may lag
+  Acceptable: eventual consistency across regions; tweets appear in other regions within 1–5s
+
+Redis multi-region:
+  Timeline cache is per-region (not globally replicated):
+    US user on US-East → US-East Redis
+    EU user on EU-West → EU-West Redis
+  Fan-out workers run per region; each region fans-out to its local Redis cluster
+  Cross-region fan-out: only if user's followers span multiple regions (use Kafka cross-region replication)
+
+Active-active vs. active-passive:
+  Twitter: active-active (every region handles traffic)
+  Conflict resolution: Cassandra last-write-wins (LWW) by timestamp for tweet updates
+  Follow graph: eventually consistent cross-region (1–5s lag for new follows to propagate)
+</code></pre>
+
+<h2>5. Consistency Model</h2>
+
+<table>
+  <thead><tr><th>Operation</th><th>Consistency</th><th>Mechanism</th><th>Acceptable Lag</th></tr></thead>
+  <tbody>
+    <tr><td>Tweet post (own timeline)</td><td>Strong (immediate)</td><td>Synchronous Redis ZADD before Kafka publish; user sees own tweet instantly</td><td>0 — user expects to see own tweet immediately</td></tr>
+    <tr><td>Tweet delivery to followers</td><td>Eventual</td><td>Kafka → fan-out workers → Redis ZADD; async pipeline</td><td>&lt; 5s for normal users; celebrity tweets appear at read time</td></tr>
+    <tr><td>Follow / unfollow</td><td>Strong (for fan-out correctness)</td><td>Cassandra QUORUM write to followers table; fan-out decisions based on this data</td><td>0 — unfollow must propagate before next fan-out batch</td></tr>
+    <tr><td>Like count display</td><td>Eventual</td><td>Redis INCR (real-time per node) + 60s Cassandra flush; cross-region eventual</td><td>&lt; 60s (acceptable: "47 likes" vs "48 likes" is imperceptible)</td></tr>
+    <tr><td>Tweet delete / unsend</td><td>Strong (for visibility)</td><td>Cassandra write + Redis removal + Kafka delete event; fan-out removes from caches</td><td>&lt; 5s propagation (deleted tweet must disappear quickly; safety/legal requirement)</td></tr>
+    <tr><td>Search index</td><td>Near-real-time (eventual)</td><td>Kafka → Elasticsearch indexer; 15s end-to-end</td><td>&lt; 15s (breaking news context; 15s is acceptable)</td></tr>
+    <tr><td>Trending topics</td><td>Eventual</td><td>Flink 5-minute sliding window; Count-Min Sketch aggregation</td><td>&lt; 5 min (trends update every 5 minutes)</td></tr>
+    <tr><td>User profile updates</td><td>Strong</td><td>PostgreSQL primary write; read replicas with 1s lag</td><td>&lt; 1s (username/avatar changes must be consistent for trust)</td></tr>
+    <tr><td>Push notifications</td><td>At-least-once</td><td>Kafka → notification service → FCM/APNs; retry on failure</td><td>Delivered within 30s; may duplicate on retry (idempotent client handling)</td></tr>
+    <tr><td>Cross-region timeline</td><td>Eventual</td><td>Kafka cross-region replication; each region's Redis cache independent</td><td>1–5s cross-region (EU follower sees US tweet within 5s)</td></tr>
+  </tbody>
+</table>
+
+<blockquote>
+  <strong>Two-domain insight for Twitter:</strong>
+  <ol>
+    <li><strong>Safety domain</strong> (tweet delete, account block, unfollow) — must propagate strongly. A deleted tweet staying visible is a legal/safety violation. A block not propagating means continued harassment.</li>
+    <li><strong>Engagement domain</strong> (timeline delivery, like counts, search indexing, trending) — can be eventually consistent. 5-second fan-out lag is invisible. 60-second like count lag is imperceptible. 15-second search lag is acceptable.</li>
+  </ol>
+</blockquote>
+
+<h2>Key Takeaways</h2>
+<ul>
+  <li><strong>Time-based Elasticsearch sharding:</strong> query pruning by date + O(1) GDPR erasure by dropping entire time shard — much better than per-document scatter-gather delete</li>
+  <li><strong>Like count = Redis INCR + 60s Cassandra flush:</strong> 57,870 likes/sec requires Redis; PostgreSQL at 5K writes/sec would need 12 nodes and still suffers single-row lock contention on viral tweets</li>
+  <li><strong>Celebrity hot partition mitigation:</strong> replication factor 3 (3× read throughput) + Redis cache in front (95%+ hit rate) = Cassandra never touched for most celebrity timeline reads</li>
+  <li><strong>LOCAL_QUORUM not QUORUM:</strong> cross-region QUORUM adds 100–200ms latency; LOCAL_QUORUM gives 5ms write latency with eventual cross-region consistency (1–5s lag)</li>
+  <li><strong>Follow/unfollow is strongly consistent:</strong> the one operation that must not be eventual — an unfollow must propagate before the next fan-out batch to prevent continued delivery to ex-follower</li>
+</ul>
+
+<h2>Interview Tips</h2>
+<ul>
+  <li>Time-based search sharding is high-signal: "partition by tweet creation day, not tweet_id hash — this enables date-range query pruning and O(1) GDPR erasure by dropping the day's index"</li>
+  <li>When asked "how do you handle a viral tweet with 10M likes?" → "Redis INCR is lock-free at the hash-slot level; 10M INCR/sec on a single key across Redis cluster = no contention because INCR is atomic per slot"</li>
+  <li>For multi-region, distinguish CAP tradeoff: "we choose AP (availability + partition tolerance) for timelines and CP (consistency + partition tolerance) for safety operations like block and delete"</li>
+  <li>Push notification idempotency: "FCM guarantees at-least-once delivery; client deduplicates by notification_id (tweet_id + notification_type) so double-delivery doesn't show double push"</li>
+  <li>Mention Cassandra repair: "WITH replication_factor=3, Cassandra async anti-entropy repair reconciles replicas that diverged during network partitions — this is how cross-region consistency is restored after a DC outage"</li>
+</ul>
+
+    </article>
+
+    <!-- Mark Complete -->
+    <div class="complete-bar">
+      <p>Ready to move on? Mark this lesson complete to track your progress.</p>
+      <button class="complete-btn" id="completeBtn" onclick="markComplete()">
+        ✓ Mark as Complete
+      </button>
+    </div>
+
+    <!-- Prev / Next -->
+    <nav class="lesson-nav">
+                  <a class="nav-card prev" href="c21-l2.html">
+        <div class="nav-label">← Previous</div>
+        <div class="nav-title">Deep Dive — Timeline Generation (Fan-out)</div>
+        <div class="nav-chapter">Design Twitter</div>
+      </a>
+      
+                  <a class="nav-card next" href="c22-l0.html">
+        <div class="nav-label">Next →</div>
+        <div class="nav-title">Requirements &amp; Estimations</div>
+        <div class="nav-chapter">Design YouTube / Netflix</div>
+      </a>
+          </nav>
+
+  </main>
+</div>
+
+<script>
+function markComplete() {
+  const btn = document.getElementById('completeBtn');
+  btn.textContent = '✓ Completed!';
+  btn.classList.add('done');
+  // In a real app: AJAX call to save progress
+}
+
+// Keyboard navigation
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.key === 'ArrowLeft') window.location = 'lesson.php?c=21&l=2';
+      if (e.key === 'ArrowRight') window.location = 'lesson.php?c=22&l=0';
+  });
+</script>
+</body>
+</html>

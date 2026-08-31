@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Deep Dive — Key Generation &amp; Encoding — Grokking System Design</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --brand:       #1F5EFF;
+  --brand-dark:  #1648CC;
+  --brand-light: #EEF4FF;
+  --text-primary:#0F172A;
+  --text-sec:    #475569;
+  --text-muted:  #94A3B8;
+  --border:      #E2E8F0;
+  --bg:          #F8FAFC;
+  --white:       #FFFFFF;
+  --radius:      12px;
+  --code-bg:     #0F172A;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text-primary);
+  line-height: 1.7;
+  min-height: 100vh;
+}
+
+/* ── TOP NAV ──────────────────────────────────────────────── */
+.topnav {
+  background: #fff;
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  box-shadow: 0 1px 4px rgba(0,0,0,.06);
+}
+.topnav-brand {
+  font-weight: 800;
+  font-size: 16px;
+  color: var(--brand);
+  text-decoration: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.topnav-brand span { color: var(--text-primary); }
+.topnav-back {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-sec);
+  text-decoration: none;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  transition: all .15s;
+}
+.topnav-back:hover { background: var(--brand-light); color: var(--brand); border-color: var(--brand); }
+.topnav-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* ── LAYOUT ───────────────────────────────────────────────── */
+.page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 40px 24px 80px;
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 40px;
+  align-items: start;
+}
+@media (max-width: 800px) {
+  .page { grid-template-columns: 1fr; }
+  .lesson-toc { display: none; }
+}
+
+/* ── LEFT: TABLE OF CONTENTS (Chapter lessons) ────────────── */
+.lesson-toc {
+  position: sticky;
+  top: 72px;
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.toc-header {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--text-muted);
+}
+.toc-chapter-title {
+  padding: 12px 16px 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.toc-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 16px;
+  font-size: 13px;
+  color: var(--text-sec);
+  text-decoration: none;
+  border-left: 3px solid transparent;
+  transition: all .1s;
+  line-height: 1.4;
+}
+.toc-item:hover { background: var(--bg); color: var(--brand); }
+.toc-item.active {
+  background: var(--brand-light);
+  color: var(--brand);
+  font-weight: 600;
+  border-left-color: var(--brand);
+}
+.toc-dot {
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 1.5px solid currentColor;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 9px; flex-shrink: 0; margin-top: 1px;
+}
+.toc-item.active .toc-dot {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+}
+
+/* ── RIGHT: MAIN CONTENT ──────────────────────────────────── */
+.lesson-content { min-width: 0; }
+
+.lesson-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+.lesson-breadcrumb a { color: var(--brand); text-decoration: none; }
+.lesson-breadcrumb a:hover { text-decoration: underline; }
+.bc-sep { color: var(--border); }
+
+.lesson-header {
+  margin-bottom: 32px;
+}
+.lesson-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 20px;
+  margin-bottom: 14px;
+  border: 1px solid;
+}
+.lesson-title {
+  font-size: clamp(22px, 4vw, 32px);
+  font-weight: 800;
+  line-height: 1.2;
+  color: var(--text-primary);
+  margin-bottom: 16px;
+}
+.lesson-meta {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.lesson-meta-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.lesson-type-badge {
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .4px;
+}
+.badge-lesson  { background: #EFF6FF; color: #1D4ED8; }
+.badge-quiz    { background: #FEF9C3; color: #A16207; }
+.badge-project { background: #F0FDF4; color: #16A34A; }
+
+/* ── OBJECTIVES BOX ───────────────────────────────────────── */
+.objectives {
+  background: linear-gradient(135deg, #EEF4FF, #F0F9FF);
+  border: 1px solid #BFDBFE;
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  margin-bottom: 32px;
+}
+.objectives h3 {
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--brand);
+  margin-bottom: 12px;
+}
+.objectives ul { list-style: none; }
+.objectives li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 14px;
+  color: var(--text-primary);
+  padding: 4px 0;
+}
+.objectives li::before {
+  content: '✓';
+  color: var(--brand);
+  font-weight: 800;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+/* ── SEPARATOR ────────────────────────────────────────────── */
+.content-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 32px 0;
+}
+
+/* ── ARTICLE BODY ─────────────────────────────────────────── */
+.lesson-body { font-size: 15px; }
+
+.lesson-body h2 {
+  font-size: 22px; font-weight: 700;
+  color: var(--text-primary);
+  margin: 32px 0 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.lesson-body h3 {
+  font-size: 17px; font-weight: 700;
+  color: var(--text-primary);
+  margin: 24px 0 10px;
+}
+.lesson-body h4 {
+  font-size: 15px; font-weight: 600;
+  color: var(--text-primary);
+  margin: 20px 0 8px;
+}
+.lesson-body p  { margin-bottom: 14px; color: var(--text-primary); }
+.lesson-body ul { margin: 12px 0 16px 20px; }
+.lesson-body li { margin-bottom: 6px; }
+
+.lesson-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 18px 0;
+  font-size: 14px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.lesson-body th {
+  background: #F1F5F9;
+  padding: 10px 14px;
+  text-align: left;
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--text-sec);
+  border-bottom: 1px solid var(--border);
+}
+.lesson-body td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.lesson-body tr:last-child td { border-bottom: none; }
+.lesson-body tr:hover td { background: var(--bg); }
+
+.lesson-body pre {
+  background: var(--code-bg);
+  border-radius: 10px;
+  padding: 20px;
+  overflow-x: auto;
+  margin: 16px 0;
+  position: relative;
+}
+.lesson-body code {
+  font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #E2E8F0;
+}
+.lesson-body p code, .lesson-body li code {
+  background: #F1F5F9;
+  color: #C2410C;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.lesson-body blockquote {
+  border-left: 4px solid var(--brand);
+  background: var(--brand-light);
+  padding: 14px 18px;
+  border-radius: 0 8px 8px 0;
+  margin: 18px 0;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.lesson-body strong { font-weight: 700; }
+.lesson-body em { font-style: italic; color: var(--text-sec); }
+.lesson-body hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
+
+/* ── PREV / NEXT NAV ──────────────────────────────────────── */
+.lesson-nav {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 48px;
+  padding-top: 32px;
+  border-top: 1px solid var(--border);
+}
+.nav-card {
+  display: flex;
+  flex-direction: column;
+  padding: 16px 20px;
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  text-decoration: none;
+  color: inherit;
+  transition: all .15s;
+  min-width: 0;
+}
+.nav-card:hover {
+  border-color: var(--brand);
+  box-shadow: 0 4px 14px rgba(31,94,255,.12);
+}
+.nav-card.next { text-align: right; }
+.nav-card.empty { visibility: hidden; }
+.nav-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.nav-card.next .nav-label { justify-content: flex-end; }
+.nav-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.nav-chapter {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── MARK COMPLETE ────────────────────────────────────────── */
+.complete-bar {
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  margin-top: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.complete-bar p {
+  font-size: 14px;
+  color: var(--text-sec);
+  margin: 0;
+}
+.complete-btn {
+  padding: 10px 22px;
+  background: #16A34A;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background .15s;
+  white-space: nowrap;
+}
+.complete-btn:hover { background: #15803D; }
+.complete-btn.done {
+  background: #F0FDF4;
+  color: #16A34A;
+  border: 1.5px solid #BBF7D0;
+  cursor: default;
+}
+</style>
+</head>
+<body>
+
+<!-- ─── TOP NAV ───────────────────────────────────────────────────── -->
+<nav class="topnav">
+  <a class="topnav-brand" href="../index.php">
+    📐 <span>Grokking System Design</span>
+  </a>
+  <div class="topnav-progress">
+    Lesson 3 of 4 in this chapter
+  </div>
+  <a class="topnav-back" href="../index.php">← Back to Roadmap</a>
+</nav>
+
+<!-- ─── PAGE LAYOUT ───────────────────────────────────────────────── -->
+<div class="page">
+
+  <!-- LEFT: CHAPTER TOC ─────────────────────────────────────────── -->
+  <aside class="lesson-toc">
+    <div class="toc-header">Chapter 16</div>
+    <div class="toc-chapter-title">
+      🔗 Design a URL Shortener (TinyURL)    </div>
+        <a class="toc-item "
+       href="c16-l0.html">
+      <div class="toc-dot">▶</div>
+      <span>Requirements &amp; Estimations</span>
+    </a>
+        <a class="toc-item "
+       href="c16-l1.html">
+      <div class="toc-dot">▶</div>
+      <span>High-Level Design &amp; API</span>
+    </a>
+        <a class="toc-item active"
+       href="c16-l2.html">
+      <div class="toc-dot">✓</div>
+      <span>Deep Dive — Key Generation &amp; Encoding</span>
+    </a>
+        <a class="toc-item "
+       href="c16-l3.html">
+      <div class="toc-dot">▶</div>
+      <span>Deep Dive — DB Partitioning &amp; Caching</span>
+    </a>
+      </aside>
+
+  <!-- RIGHT: LESSON CONTENT ─────────────────────────────────────── -->
+  <main class="lesson-content">
+
+    <!-- Breadcrumb -->
+    <div class="lesson-breadcrumb">
+      <a href="../index.php">Roadmap</a>
+      <span class="bc-sep">›</span>
+      <span>Design a URL Shortener (TinyURL)</span>
+      <span class="bc-sep">›</span>
+      <span>Deep Dive — Key Generation &amp; Encoding</span>
+    </div>
+
+    <!-- Lesson Header -->
+    <div class="lesson-header">
+      <div class="lesson-tag" style="background:#EFF6FF;color:#1D4ED8;border-color:#BFDBFE">
+        🔗 Design Problems      </div>
+      <h1 class="lesson-title">Deep Dive — Key Generation &amp; Encoding</h1>
+      <div class="lesson-meta">
+        <div class="lesson-meta-item">
+          <span class="lesson-type-badge badge-lesson">lesson</span>
+        </div>
+        <div class="lesson-meta-item">⏱ 12 min</div>
+        <div class="lesson-meta-item">📖 Chapter 16, Lesson 3</div>
+      </div>
+    </div>
+
+    <!-- Learning Objectives -->
+    <div class="objectives">
+      <h3>🎯 Learning Objectives</h3>
+      <ul>
+                <li>Compare all short code generation strategies and their collision properties</li>
+                <li>Implement Snowflake ID generation and base62 encoding step by step</li>
+                <li>Design the Key Generation Service (KGS) as a scalable, pre-generation alternative</li>
+              </ul>
+    </div>
+
+    <div class="content-divider"></div>
+
+    <!-- Lesson Body -->
+    <article class="lesson-body">
+      <h2>Short Code Generation — Full Comparison</h2><table><tr><th>Strategy</th><th>Collision Risk</th><th>Predictable</th><th>Distributed</th><th>Recommended</th></tr><tr><td>MD5 + truncate</td><td>Medium (birthday problem)</td><td>Yes</td><td>Yes</td><td>No</td></tr><tr><td>Snowflake + base62</td><td>None (by construction)</td><td>Slightly</td><td>Yes</td><td><strong>Yes</strong></td></tr><tr><td>Secure random</td><td>Low (probability-based)</td><td>No</td><td>Yes</td><td>Only if security critical</td></tr><tr><td>Pre-generated pool (KGS)</td><td>None</td><td>No</td><td>Via DB</td><td>Yes (for highest scale)</td></tr></table><h2>Option A — MD5/SHA256 Hash + Truncation</h2><pre><code>import hashlib, base64
+
+def shorten_md5(long_url: str) -&gt; str:
+    hash_bytes = hashlib.md5(long_url.encode()).digest()
+    # Base64-encode, take first 7 URL-safe chars
+    return base64.urlsafe_b64encode(hash_bytes)[:7].decode()
+
+# Problem: &quot;same URL → same code&quot; only within same namespace
+# Collision example:
+#   md5(&quot;https://a.com&quot;) = &quot;0cc175b9...&quot;
+#   md5(&quot;https://b.com&quot;) = &quot;92eb5ffe...&quot;
+#   Both truncate to &quot;abc1234&quot; → COLLISION → need DB check + retry</code></pre><p><strong>Why MD5 truncation fails at scale:</strong></p><pre><code>Birthday problem: with 7-char base62 (3.5T codes), collisions start
+appearing at ~59M insertions (√(3.5T × ln2) ≈ 49M)
+
+At 100M URLs/day → collisions from day 1.
+Every write requires: generate code → check DB → collision? → retry loop
+Under high write load, retry storms amplify latency.</code></pre><h2>Option B — Snowflake ID + Base62 (Recommended)</h2><h3>Snowflake ID Structure (Twitter, 2010)</h3><pre><code>64-bit integer layout:
+┌─────────────────────┬──────────────┬─────────────────┐
+│   41 bits           │   10 bits    │   12 bits       │
+│   Timestamp (ms)    │  Machine ID  │  Sequence #     │
+│   since epoch       │  (0-1023)    │  per ms (0-4095)│
+└─────────────────────┴──────────────┴─────────────────┘
+
+Capacity:
+  Timestamp: 2^41 ms = 69 years of uniqueness
+  Machines:  2^10 = 1,024 generator nodes
+  Per node:  2^12 = 4,096 IDs per millisecond
+  Total:     4,096 × 1,024 × 1,000 = 4.19 billion IDs/second</code></pre><h3>Python Implementation</h3><pre><code>import time
+
+class SnowflakeGenerator:
+    EPOCH = 1672531200000  # 2023-01-01 00:00:00 UTC in ms
+    MACHINE_ID = 1         # Set per deployment node (0-1023)
+
+    def __init__(self):
+        self.sequence = 0
+        self.last_ms = -1
+
+    def next_id(self) -&gt; int:
+        now_ms = int(time.time() * 1000)
+
+        if now_ms == self.last_ms:
+            self.sequence = (self.sequence + 1) &amp; 0xFFF  # 12-bit mask
+            if self.sequence == 0:
+                # Sequence exhausted — wait for next millisecond
+                while now_ms &lt;= self.last_ms:
+                    now_ms = int(time.time() * 1000)
+        else:
+            self.sequence = 0
+
+        self.last_ms = now_ms
+        return ((now_ms - self.EPOCH) &lt;&lt; 22) | (self.MACHINE_ID &lt;&lt; 12) | self.sequence
+
+
+def to_base62(num: int) -&gt; str:
+    ALPHABET = &quot;0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz&quot;
+    if num == 0:
+        return ALPHABET[0]
+    result = []
+    while num:
+        result.append(ALPHABET[num % 62])
+        num //= 62
+    return &#039;&#039;.join(reversed(result))
+
+
+# Usage:
+gen = SnowflakeGenerator()
+snowflake_id = gen.next_id()           # e.g. 7234891234567
+short_code = to_base62(snowflake_id)[:7]  # e.g. &quot;aB3xK9m&quot;</code></pre><h3>Why Snowflake + base62 has no collisions</h3><pre><code>Snowflake IDs are unique by construction:
+  - Timestamp ms + machine ID + sequence → guaranteed unique across all nodes
+  - Base62 encoding is a bijection (1:1 mapping) — no two IDs produce same code
+  - No DB lookup needed before insert — zero collision risk
+
+Tradeoff: IDs are slightly sequential (time-based)
+  → An attacker could enumerate codes (guess abc1234, abc1235...)
+  Fix: shuffle the base62 alphabet (keep private) or add HMAC prefix</code></pre><h2>Option C — Key Generation Service (KGS)</h2><p>Pre-generate all 7-character base62 codes, store in a database, mark as used on demand.</p><pre><code>KGS Database:
+  Table: url_codes
+  Columns: code TEXT, used BOOLEAN
+  Pre-populated: all 3.5 trillion codes (offline batch job)
+
+  SELECT code FROM url_codes WHERE used = false LIMIT 1000;
+  UPDATE url_codes SET used = true WHERE code IN (...);
+
+App Server flow:
+  1. Fetch batch of 1,000 codes from KGS (in-memory pool per server)
+  2. On URL creation → pop code from local pool
+  3. When pool low → async refill from KGS
+  4. KGS uses transactions to prevent double-assignment</code></pre><p><strong>Tradeoffs:</strong></p><ul><li>No runtime generation — O(1) code assignment</li><li>Single point of failure if KGS is down (fix: replicate KGS, use 2-phase assignment)</li><li>Requires pre-population job (3.5T rows = large but feasible for SSD storage)</li><li>Used by Bit.ly (they pre-generate codes in batches)</li></ul><h2>Handling Custom Aliases</h2><pre><code>-- PostgreSQL (for smaller scale or metadata service):
+INSERT INTO url_mappings (short_code, long_url, user_id)
+VALUES (&#039;my-brand&#039;, &#039;https://...&#039;, 123)
+ON CONFLICT (short_code) DO NOTHING
+RETURNING short_code;
+-- NULL returned if conflict → respond 409
+
+-- Cassandra (for high scale):
+INSERT INTO url_mappings (short_code, long_url)
+VALUES (&#039;my-brand&#039;, &#039;https://...&#039;)
+IF NOT EXISTS;
+-- [applied] = false on conflict → respond 409
+
+-- Rate limit custom aliases per user (prevent namespace squatting):
+-- Redis: INCR user:$userId:custom_aliases / day → max 10/day</code></pre><h2>Alphabet Shuffling (Security Hardening)</h2><pre><code># Default base62 alphabet is enumerable: 0,1,2,3... → aB3xK9m,aB3xK9n...
+# Shuffle the alphabet (deploy-time secret):
+
+import random
+DEFAULT = &quot;0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz&quot;
+SHUFFLED = &quot;mK7xZqP2NfGa...&quot;  # shuffled at deploy, stored in config
+
+def to_base62_secure(num: int) -&gt; str:
+    ALPHABET = SHUFFLED  # Use shuffled alphabet
+    # Same algorithm, non-sequential output</code></pre><blockquote>💡 <strong>FAANG tip:</strong> The interviewer will often ask &quot;what if two users request the same long URL?&quot; — have a clear answer: either (a) always generate new code (simpler, more DB rows) or (b) lookup a <code>url_by_hash</code> reverse index and return the existing code (dedup). The tradeoff is one extra read per write vs. duplicate rows. For most systems, option (a) is fine unless storage is a concern.</blockquote>    </article>
+
+    <!-- Mark Complete -->
+    <div class="complete-bar">
+      <p>Ready to move on? Mark this lesson complete to track your progress.</p>
+      <button class="complete-btn" id="completeBtn" onclick="markComplete()">
+        ✓ Mark as Complete
+      </button>
+    </div>
+
+    <!-- Prev / Next -->
+    <nav class="lesson-nav">
+                  <a class="nav-card prev" href="c16-l1.html">
+        <div class="nav-label">← Previous</div>
+        <div class="nav-title">High-Level Design &amp; API</div>
+        <div class="nav-chapter">Design a URL Shortener (TinyURL)</div>
+      </a>
+      
+                  <a class="nav-card next" href="c16-l3.html">
+        <div class="nav-label">Next →</div>
+        <div class="nav-title">Deep Dive — DB Partitioning &amp; Caching</div>
+        <div class="nav-chapter">Design a URL Shortener (TinyURL)</div>
+      </a>
+          </nav>
+
+  </main>
+</div>
+
+<script>
+function markComplete() {
+  const btn = document.getElementById('completeBtn');
+  btn.textContent = '✓ Completed!';
+  btn.classList.add('done');
+  // In a real app: AJAX call to save progress
+}
+
+// Keyboard navigation
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.key === 'ArrowLeft') window.location = 'lesson.php?c=16&l=1';
+      if (e.key === 'ArrowRight') window.location = 'lesson.php?c=16&l=3';
+  });
+</script>
+</body>
+</html>

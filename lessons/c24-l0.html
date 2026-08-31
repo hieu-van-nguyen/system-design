@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Requirements &amp; Rate Limiting Algorithms — Grokking System Design</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --brand:       #1F5EFF;
+  --brand-dark:  #1648CC;
+  --brand-light: #EEF4FF;
+  --text-primary:#0F172A;
+  --text-sec:    #475569;
+  --text-muted:  #94A3B8;
+  --border:      #E2E8F0;
+  --bg:          #F8FAFC;
+  --white:       #FFFFFF;
+  --radius:      12px;
+  --code-bg:     #0F172A;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text-primary);
+  line-height: 1.7;
+  min-height: 100vh;
+}
+
+/* ── TOP NAV ──────────────────────────────────────────────── */
+.topnav {
+  background: #fff;
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  box-shadow: 0 1px 4px rgba(0,0,0,.06);
+}
+.topnav-brand {
+  font-weight: 800;
+  font-size: 16px;
+  color: var(--brand);
+  text-decoration: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.topnav-brand span { color: var(--text-primary); }
+.topnav-back {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-sec);
+  text-decoration: none;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  transition: all .15s;
+}
+.topnav-back:hover { background: var(--brand-light); color: var(--brand); border-color: var(--brand); }
+.topnav-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* ── LAYOUT ───────────────────────────────────────────────── */
+.page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 40px 24px 80px;
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 40px;
+  align-items: start;
+}
+@media (max-width: 800px) {
+  .page { grid-template-columns: 1fr; }
+  .lesson-toc { display: none; }
+}
+
+/* ── LEFT: TABLE OF CONTENTS (Chapter lessons) ────────────── */
+.lesson-toc {
+  position: sticky;
+  top: 72px;
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.toc-header {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--text-muted);
+}
+.toc-chapter-title {
+  padding: 12px 16px 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.toc-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 16px;
+  font-size: 13px;
+  color: var(--text-sec);
+  text-decoration: none;
+  border-left: 3px solid transparent;
+  transition: all .1s;
+  line-height: 1.4;
+}
+.toc-item:hover { background: var(--bg); color: var(--brand); }
+.toc-item.active {
+  background: var(--brand-light);
+  color: var(--brand);
+  font-weight: 600;
+  border-left-color: var(--brand);
+}
+.toc-dot {
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 1.5px solid currentColor;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 9px; flex-shrink: 0; margin-top: 1px;
+}
+.toc-item.active .toc-dot {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+}
+
+/* ── RIGHT: MAIN CONTENT ──────────────────────────────────── */
+.lesson-content { min-width: 0; }
+
+.lesson-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+.lesson-breadcrumb a { color: var(--brand); text-decoration: none; }
+.lesson-breadcrumb a:hover { text-decoration: underline; }
+.bc-sep { color: var(--border); }
+
+.lesson-header {
+  margin-bottom: 32px;
+}
+.lesson-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 20px;
+  margin-bottom: 14px;
+  border: 1px solid;
+}
+.lesson-title {
+  font-size: clamp(22px, 4vw, 32px);
+  font-weight: 800;
+  line-height: 1.2;
+  color: var(--text-primary);
+  margin-bottom: 16px;
+}
+.lesson-meta {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.lesson-meta-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.lesson-type-badge {
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .4px;
+}
+.badge-lesson  { background: #EFF6FF; color: #1D4ED8; }
+.badge-quiz    { background: #FEF9C3; color: #A16207; }
+.badge-project { background: #F0FDF4; color: #16A34A; }
+
+/* ── OBJECTIVES BOX ───────────────────────────────────────── */
+.objectives {
+  background: linear-gradient(135deg, #EEF4FF, #F0F9FF);
+  border: 1px solid #BFDBFE;
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  margin-bottom: 32px;
+}
+.objectives h3 {
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--brand);
+  margin-bottom: 12px;
+}
+.objectives ul { list-style: none; }
+.objectives li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 14px;
+  color: var(--text-primary);
+  padding: 4px 0;
+}
+.objectives li::before {
+  content: '✓';
+  color: var(--brand);
+  font-weight: 800;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+/* ── SEPARATOR ────────────────────────────────────────────── */
+.content-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 32px 0;
+}
+
+/* ── ARTICLE BODY ─────────────────────────────────────────── */
+.lesson-body { font-size: 15px; }
+
+.lesson-body h2 {
+  font-size: 22px; font-weight: 700;
+  color: var(--text-primary);
+  margin: 32px 0 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.lesson-body h3 {
+  font-size: 17px; font-weight: 700;
+  color: var(--text-primary);
+  margin: 24px 0 10px;
+}
+.lesson-body h4 {
+  font-size: 15px; font-weight: 600;
+  color: var(--text-primary);
+  margin: 20px 0 8px;
+}
+.lesson-body p  { margin-bottom: 14px; color: var(--text-primary); }
+.lesson-body ul { margin: 12px 0 16px 20px; }
+.lesson-body li { margin-bottom: 6px; }
+
+.lesson-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 18px 0;
+  font-size: 14px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.lesson-body th {
+  background: #F1F5F9;
+  padding: 10px 14px;
+  text-align: left;
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--text-sec);
+  border-bottom: 1px solid var(--border);
+}
+.lesson-body td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.lesson-body tr:last-child td { border-bottom: none; }
+.lesson-body tr:hover td { background: var(--bg); }
+
+.lesson-body pre {
+  background: var(--code-bg);
+  border-radius: 10px;
+  padding: 20px;
+  overflow-x: auto;
+  margin: 16px 0;
+  position: relative;
+}
+.lesson-body code {
+  font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #E2E8F0;
+}
+.lesson-body p code, .lesson-body li code {
+  background: #F1F5F9;
+  color: #C2410C;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.lesson-body blockquote {
+  border-left: 4px solid var(--brand);
+  background: var(--brand-light);
+  padding: 14px 18px;
+  border-radius: 0 8px 8px 0;
+  margin: 18px 0;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.lesson-body strong { font-weight: 700; }
+.lesson-body em { font-style: italic; color: var(--text-sec); }
+.lesson-body hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
+
+/* ── PREV / NEXT NAV ──────────────────────────────────────── */
+.lesson-nav {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 48px;
+  padding-top: 32px;
+  border-top: 1px solid var(--border);
+}
+.nav-card {
+  display: flex;
+  flex-direction: column;
+  padding: 16px 20px;
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  text-decoration: none;
+  color: inherit;
+  transition: all .15s;
+  min-width: 0;
+}
+.nav-card:hover {
+  border-color: var(--brand);
+  box-shadow: 0 4px 14px rgba(31,94,255,.12);
+}
+.nav-card.next { text-align: right; }
+.nav-card.empty { visibility: hidden; }
+.nav-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.nav-card.next .nav-label { justify-content: flex-end; }
+.nav-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.nav-chapter {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── MARK COMPLETE ────────────────────────────────────────── */
+.complete-bar {
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  margin-top: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.complete-bar p {
+  font-size: 14px;
+  color: var(--text-sec);
+  margin: 0;
+}
+.complete-btn {
+  padding: 10px 22px;
+  background: #16A34A;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background .15s;
+  white-space: nowrap;
+}
+.complete-btn:hover { background: #15803D; }
+.complete-btn.done {
+  background: #F0FDF4;
+  color: #16A34A;
+  border: 1.5px solid #BBF7D0;
+  cursor: default;
+}
+</style>
+</head>
+<body>
+
+<!-- ─── TOP NAV ───────────────────────────────────────────────────── -->
+<nav class="topnav">
+  <a class="topnav-brand" href="../index.php">
+    📐 <span>Grokking System Design</span>
+  </a>
+  <div class="topnav-progress">
+    Lesson 1 of 3 in this chapter
+  </div>
+  <a class="topnav-back" href="../index.php">← Back to Roadmap</a>
+</nav>
+
+<!-- ─── PAGE LAYOUT ───────────────────────────────────────────────── -->
+<div class="page">
+
+  <!-- LEFT: CHAPTER TOC ─────────────────────────────────────────── -->
+  <aside class="lesson-toc">
+    <div class="toc-header">Chapter 24</div>
+    <div class="toc-chapter-title">
+      🚦 Design an API Rate Limiter    </div>
+        <a class="toc-item active"
+       href="c24-l0.html">
+      <div class="toc-dot">✓</div>
+      <span>Requirements &amp; Rate Limiting Algorithms</span>
+    </a>
+        <a class="toc-item "
+       href="c24-l1.html">
+      <div class="toc-dot">▶</div>
+      <span>High-Level Design &amp; Redis Implementation</span>
+    </a>
+        <a class="toc-item "
+       href="c24-l2.html">
+      <div class="toc-dot">▶</div>
+      <span>Deep Dive — Distributed Rate Limiting</span>
+    </a>
+      </aside>
+
+  <!-- RIGHT: LESSON CONTENT ─────────────────────────────────────── -->
+  <main class="lesson-content">
+
+    <!-- Breadcrumb -->
+    <div class="lesson-breadcrumb">
+      <a href="../index.php">Roadmap</a>
+      <span class="bc-sep">›</span>
+      <span>Design an API Rate Limiter</span>
+      <span class="bc-sep">›</span>
+      <span>Requirements &amp; Rate Limiting Algorithms</span>
+    </div>
+
+    <!-- Lesson Header -->
+    <div class="lesson-header">
+      <div class="lesson-tag" style="background:#EFF6FF;color:#1D4ED8;border-color:#BFDBFE">
+        🚦 Design Problems      </div>
+      <h1 class="lesson-title">Requirements &amp; Rate Limiting Algorithms</h1>
+      <div class="lesson-meta">
+        <div class="lesson-meta-item">
+          <span class="lesson-type-badge badge-lesson">lesson</span>
+        </div>
+        <div class="lesson-meta-item">⏱ 12 min</div>
+        <div class="lesson-meta-item">📖 Chapter 24, Lesson 1</div>
+      </div>
+    </div>
+
+    <!-- Learning Objectives -->
+    <div class="objectives">
+      <h3>🎯 Learning Objectives</h3>
+      <ul>
+                <li>Enumerate the 5 rate limiting algorithms (Token Bucket, Leaky Bucket, Fixed Window, Sliding Log, Sliding Counter) with concrete tradeoffs</li>
+                <li>Clarify the 6 key dimensions that define a rate limiter before designing (scope, limit granularity, enforcement layer, burst tolerance, response behavior, consistency model)</li>
+                <li>Quantify the fixed-window boundary spike: a 2× burst at window edges and why it fails for traffic smoothing</li>
+                <li>Select the right algorithm for a given scenario: Token Bucket for API burst tolerance, Sliding Window Counter for balanced production systems</li>
+              </ul>
+    </div>
+
+    <div class="content-divider"></div>
+
+    <!-- Lesson Body -->
+    <article class="lesson-body">
+      <h2>Requirements &amp; Rate Limiting Algorithms</h2>
+
+      <h3>1. Clarifying Questions</h3>
+      <p>Rate limiting seems simple but hides significant design decisions. Ask these before drawing anything:</p>
+      <table>
+        <thead><tr><th>Question</th><th>Why It Matters</th><th>Typical Answer</th></tr></thead>
+        <tbody>
+          <tr><td>What is the rate limiting scope? Per user, per IP, per API key, per endpoint, or global?</td><td>Determines the Redis key structure. Per-user = <code>ratelimit:{user_id}:{endpoint}</code>. IP = <code>ratelimit:{ip}</code>. Multiple dimensions compound complexity.</td><td>Per user + per API key; endpoint-specific limits</td></tr>
+          <tr><td>What are the limit values? Requests per second? Per minute? Per day?</td><td>Drives the window size and Redis TTL. A "100 req/min" limit with 1-sec granularity needs 60 buckets vs. 1 for a fixed window.</td><td>100 req/min for free tier; 1,000/min for paid; 10,000/min for enterprise</td></tr>
+          <tr><td>Hard limit (reject) or soft limit (throttle/delay)?</td><td>Hard = HTTP 429 with Retry-After. Soft = queue with delay. Soft requires a job queue (SQS/Kafka), which adds complexity.</td><td>Hard limit — return 429 immediately</td></tr>
+          <tr><td>Where does enforcement happen? API Gateway, application middleware, or service mesh?</td><td>API Gateway (Kong, AWS API GW) = centralized, language-agnostic, adds 1–5ms. Middleware = per-service, allows custom logic. Service mesh = sidecar overhead.</td><td>API Gateway for public APIs; middleware for internal services</td></tr>
+          <tr><td>Must limits be exact (strong consistency) or approximate (eventual)?</td><td>Exact requires global coordination (Redis MULTI/EXEC Lua). Approximate allows local counters + periodic sync — 10× faster but may allow 10% overage.</td><td>Approximate is OK — 1% overage acceptable</td></tr>
+          <tr><td>Do we need burst tolerance (allow 200 req in first second even with 100/min limit)?</td><td>Token Bucket allows bursting; Fixed Window does not. Many APIs (Stripe, GitHub) allow burst to improve perceived responsiveness.</td><td>Yes — allow bursting up to 2× limit over 5 seconds</td></tr>
+        </tbody>
+      </table>
+
+      <h3>2. Functional Requirements</h3>
+      <ul>
+        <li><strong>Rate limit enforcement:</strong> Reject requests exceeding the configured threshold with HTTP 429 and a <code>Retry-After</code> header.</li>
+        <li><strong>Multi-tier limits:</strong> Free: 100 req/min; Basic: 1,000 req/min; Enterprise: 10,000 req/min. Limits configurable per API key without deployment.</li>
+        <li><strong>Response headers:</strong> Every API response includes <code>X-RateLimit-Limit</code>, <code>X-RateLimit-Remaining</code>, <code>X-RateLimit-Reset</code> so clients can self-throttle.</li>
+        <li><strong>Multi-dimension limiting:</strong> Enforce per user AND per endpoint simultaneously (e.g., 100 req/min globally but 10 req/min to <code>POST /payment</code>).</li>
+        <li><strong>Audit log:</strong> Log every rate-limit rejection (user_id, endpoint, timestamp) for analytics and abuse investigation.</li>
+        <li><strong>Dynamic rule updates:</strong> Change limits in real-time (no redeploy) — stored in DB, cached in memory with 30s TTL.</li>
+      </ul>
+
+      <h3>3. Non-Functional Requirements</h3>
+      <table>
+        <thead><tr><th>Property</th><th>Target</th><th>Rationale</th></tr></thead>
+        <tbody>
+          <tr><td>Latency overhead</td><td>&lt; 5ms p99 added by rate limiter</td><td>Rate limiter sits in the hot path of every API request; &gt;5ms is noticeable</td></tr>
+          <tr><td>Availability</td><td>Fail open (allow on Redis failure)</td><td>A rate limiter outage should NOT block legitimate traffic; better to allow some excess than kill the API</td></tr>
+          <tr><td>Accuracy</td><td>±1% overage acceptable</td><td>Exact global counting requires distributed locking; 1% slack allows local-counter optimization</td></tr>
+          <tr><td>Throughput</td><td>500K checks/sec</td><td>At Stripe scale: 100M API calls/day = 1,157/sec average; peak 8× = ~9,000/sec. At Twitter/Meta: 500K req/sec</td></tr>
+          <tr><td>Rule propagation</td><td>&lt; 30 seconds</td><td>Ops team emergency limit change (DDoS response) must take effect quickly</td></tr>
+        </tbody>
+      </table>
+
+      <h3>4. The 5 Rate Limiting Algorithms</h3>
+
+      <h4>4.1 Token Bucket</h4>
+      <pre><code>
+// Bucket starts full (capacity = limit). Tokens refill at fixed rate.
+// Each request consumes 1 token. If bucket empty → reject.
+
+state = { tokens: 100, last_refill: now() }
+
+def allow_request(state, capacity, refill_rate):
+    now = current_time()
+    elapsed = now - state.last_refill
+    # Refill tokens proportional to elapsed time
+    tokens = min(capacity, state.tokens + elapsed × refill_rate)
+    if tokens >= 1:
+        state.tokens = tokens - 1
+        state.last_refill = now
+        return ALLOW
+    else:
+        return REJECT (HTTP 429)
+
+// Config: capacity=100 (burst limit), refill_rate=100/60 tokens/sec (100/min steady state)
+// Result: allows burst of 100 req instantly, then 1.67 req/sec steady state
+      </code></pre>
+      <table>
+        <thead><tr><th>Aspect</th><th>Token Bucket</th></tr></thead>
+        <tbody>
+          <tr><td>Burst handling</td><td>✅ Yes — can consume all tokens instantly</td></tr>
+          <tr><td>Memory</td><td>2 values per key (tokens + last_refill) → minimal</td></tr>
+          <tr><td>Smoothness</td><td>❌ Traffic is NOT smoothed — allows bursts</td></tr>
+          <tr><td>Used by</td><td>AWS API Gateway, Stripe, GitHub API, Cloudflare</td></tr>
+        </tbody>
+      </table>
+
+      <h4>4.2 Leaky Bucket</h4>
+      <pre><code>
+// Requests enter a FIFO queue (the "bucket"). Processed at a fixed output rate.
+// If queue full → reject incoming request.
+
+queue = Queue(maxsize=100)   // bucket capacity
+
+# Request handler:
+if queue.full():
+    return REJECT (HTTP 429)
+queue.put(request)
+
+# Leak thread (runs at fixed rate: 100 req/min = ~1.67/sec):
+while True:
+    if not queue.empty():
+        process(queue.get())
+    sleep(1 / leak_rate)
+      </code></pre>
+      <table>
+        <thead><tr><th>Aspect</th><th>Leaky Bucket</th></tr></thead>
+        <tbody>
+          <tr><td>Burst handling</td><td>❌ No — bursts queued, processed at fixed rate</td></tr>
+          <tr><td>Output rate</td><td>✅ Perfectly smooth — constant downstream rate</td></tr>
+          <tr><td>Memory</td><td>Queue storage per user (can be large)</td></tr>
+          <tr><td>Used by</td><td>Shopify, network traffic shapers (QoS)</td></tr>
+        </tbody>
+      </table>
+
+      <h4>4.3 Fixed Window Counter</h4>
+      <pre><code>
+// Divide time into fixed windows (e.g., each minute). Count requests per window.
+// If count exceeds limit → reject.
+
+window_key = "ratelimit:{user_id}:{endpoint}:{minute_timestamp}"
+# minute_timestamp = floor(now / 60)  →  1725000060, 1725000120, ...
+
+count = INCR window_key
+if count == 1:
+    EXPIRE window_key 60   // auto-cleanup after window expires
+if count &gt; limit:
+    return REJECT (HTTP 429)
+return ALLOW
+      </code></pre>
+
+      <div class="callout callout-warning">
+        <strong>⚠️ Fixed Window Boundary Spike:</strong> A user can send 100 requests at 11:59:59 and 100 more at 12:00:00 — 200 requests in a 2-second span, yet both windows show count=100. The <em>effective</em> rate at the boundary is 2× the limit. For APIs where burst causes downstream harm (payment processors, SMS gateways), this is unacceptable.
+      </div>
+      <table>
+        <thead><tr><th>Aspect</th><th>Fixed Window Counter</th></tr></thead>
+        <tbody>
+          <tr><td>Implementation</td><td>✅ Trivial — single Redis INCR + EXPIRE</td></tr>
+          <tr><td>Memory</td><td>✅ O(1) per user per window</td></tr>
+          <tr><td>Accuracy</td><td>❌ 2× burst possible at window boundary</td></tr>
+          <tr><td>Used by</td><td>Simple internal APIs; acceptable when burst is OK</td></tr>
+        </tbody>
+      </table>
+
+      <h4>4.4 Sliding Window Log</h4>
+      <pre><code>
+// Store timestamp of every request in a sorted set. Count requests in rolling window.
+
+def allow_request(user_id, endpoint, limit, window_secs):
+    key = "ratelimit_log:{user_id}:{endpoint}"
+    now = current_time_ms()
+    window_start = now - window_secs × 1000
+
+    # Atomic operations via pipeline or Lua:
+    ZREMRANGEBYSCORE key -inf (window_start - 1)  // remove expired entries
+    count = ZCARD key                               // count remaining in window
+    if count &lt; limit:
+        ZADD key now now                            // add current request (score=member=timestamp)
+        EXPIRE key window_secs
+        return ALLOW
+    else:
+        return REJECT (HTTP 429)
+      </code></pre>
+      <table>
+        <thead><tr><th>Aspect</th><th>Sliding Window Log</th></tr></thead>
+        <tbody>
+          <tr><td>Accuracy</td><td>✅ Exact — no boundary spike</td></tr>
+          <tr><td>Memory</td><td>❌ O(requests_per_window) per user — for 1,000 req/min limit: 1,000 entries in sorted set</td></tr>
+          <tr><td>Burst handling</td><td>✅ Naturally handles burst (counts actual timestamps)</td></tr>
+          <tr><td>Used by</td><td>Stripe for critical payment endpoints; acceptable when accuracy &gt; memory</td></tr>
+        </tbody>
+      </table>
+
+      <h4>4.5 Sliding Window Counter (Hybrid — Production Choice)</h4>
+      <pre><code>
+// Approximate sliding window using two fixed-window counters + weighted interpolation.
+// Accuracy: within ±1% for uniform traffic.
+
+def allow_request(user_id, limit, window_secs):
+    now = current_time()
+    current_window = floor(now / window_secs)
+    prev_window = current_window - 1
+
+    cur_key  = "ratelimit:{user_id}:{current_window}"
+    prev_key = "ratelimit:{user_id}:{prev_window}"
+
+    cur_count  = GET cur_key  or 0
+    prev_count = GET prev_key or 0
+
+    # How far into the current window are we? (0.0 → 1.0)
+    elapsed_fraction = (now % window_secs) / window_secs
+
+    # Weight: previous window contributes proportionally to how much of current window remains
+    weighted_count = cur_count + prev_count × (1 - elapsed_fraction)
+
+    if weighted_count &lt; limit:
+        INCR cur_key
+        EXPIRE cur_key (window_secs × 2)
+        return ALLOW
+    else:
+        return REJECT (HTTP 429)
+
+// Example: window=60s, limit=100, now=45s into window (elapsed_fraction=0.75)
+// prev_count=80, cur_count=30
+// weighted = 30 + 80 × (1 - 0.75) = 30 + 20 = 50 ✅ ALLOW
+      </code></pre>
+      <table>
+        <thead><tr><th>Aspect</th><th>Sliding Window Counter</th></tr></thead>
+        <tbody>
+          <tr><td>Accuracy</td><td>✅ Within ±1% (proven mathematically for uniform traffic)</td></tr>
+          <tr><td>Memory</td><td>✅ O(1) — only 2 integers per user, regardless of request count</td></tr>
+          <tr><td>Burst handling</td><td>✅ Partial — smooths the boundary spike significantly</td></tr>
+          <tr><td>Implementation complexity</td><td>Medium — requires 2 Redis GETs + weighted math</td></tr>
+          <tr><td>Used by</td><td>Cloudflare Workers, nginx rate limiting, most production systems</td></tr>
+        </tbody>
+      </table>
+
+      <h3>5. Algorithm Comparison</h3>
+      <table>
+        <thead><tr><th>Algorithm</th><th>Memory</th><th>Burst OK?</th><th>Boundary Spike?</th><th>Complexity</th><th>Best For</th></tr></thead>
+        <tbody>
+          <tr><td>Token Bucket</td><td>O(1)</td><td>✅ Yes</td><td>N/A</td><td>Low</td><td>APIs that should allow burst (GitHub, Stripe)</td></tr>
+          <tr><td>Leaky Bucket</td><td>O(queue size)</td><td>❌ No</td><td>None</td><td>Medium</td><td>Smoothing egress rate (network QoS)</td></tr>
+          <tr><td>Fixed Window</td><td>O(1)</td><td>Limited</td><td>❌ 2× at boundary</td><td>Trivial</td><td>Simple internal APIs; burst-tolerant scenarios</td></tr>
+          <tr><td>Sliding Window Log</td><td>O(limit)</td><td>✅ Yes</td><td>None</td><td>Low</td><td>Critical endpoints where precision matters, low traffic</td></tr>
+          <tr><td><strong>Sliding Window Counter</strong></td><td><strong>O(1)</strong></td><td>✅ Partial</td><td><strong>Minimal (&lt;1%)</strong></td><td>Medium</td><td><strong>General-purpose production rate limiting</strong></td></tr>
+        </tbody>
+      </table>
+
+      <h3>6. Scale Estimations</h3>
+      <table>
+        <thead><tr><th>Company / API</th><th>Daily Requests</th><th>Avg QPS</th><th>Peak QPS (8×)</th><th>Redis ops/sec needed</th></tr></thead>
+        <tbody>
+          <tr><td>Stripe</td><td>100M</td><td>1,157</td><td>9,256</td><td>~28K (3 Redis ops/request)</td></tr>
+          <tr><td>Twitter API</td><td>1B</td><td>11,574</td><td>92,592</td><td>~278K</td></tr>
+          <tr><td>Cloudflare edge</td><td>100B+</td><td>1.16M</td><td>9.3M</td><td>Distributed local counters (Redis not feasible at this scale)</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout callout-insight">
+        <strong>💡 At Cloudflare Scale:</strong> 9M QPS makes a centralized Redis rate limiter impossible — even Redis Cluster at 1M ops/sec per node would need 9 nodes just for the check, with cross-datacenter latency dominating. Cloudflare uses local in-memory counters on each edge node, syncing periodically. This allows ~5% overage but eliminates the inter-node coordination cost entirely. Know this boundary — it comes up in senior interviews.
+      </div>
+
+      <h3>Key Takeaways</h3>
+      <ul>
+        <li><strong>Token Bucket = burst tolerance:</strong> Used by AWS, Stripe, GitHub. Allows all tokens to be consumed at once — ideal for APIs where a short burst is OK.</li>
+        <li><strong>Sliding Window Counter = production default:</strong> O(1) memory, ~1% accuracy, no boundary spike. Cloudflare's algorithm for Workers. The right answer for most interview scenarios.</li>
+        <li><strong>Fixed Window has a 2× boundary spike:</strong> At the window boundary, clients can legally send 2× the limit in a 2-second window. Know this failure mode and when it matters.</li>
+        <li><strong>Sliding Window Log is memory-expensive:</strong> Requires storing every timestamp. For a 1,000 req/min limit, that's 1,000 Redis sorted-set entries per user — impractical at millions of users.</li>
+        <li><strong>Clarify burst tolerance first:</strong> It drives the algorithm choice more than any other requirement. Token Bucket if burst OK; Sliding Window Counter if smooth is required.</li>
+        <li><strong>Fail open on Redis failure:</strong> The rate limiter must not become a single point of failure. If Redis is unreachable, allow requests through with reduced accuracy rather than rejecting all traffic.</li>
+      </ul>
+
+      <h3>Interview Tips</h3>
+      <ul>
+        <li><strong>Name all 5 algorithms upfront:</strong> "There are 5 common rate limiting algorithms — let me briefly describe each and then explain which I'd choose for this system." This immediately signals breadth of knowledge.</li>
+        <li><strong>Draw the Token Bucket visually:</strong> A bucket with water dripping in at a fixed rate and requests consuming drops is instantly understandable. Interviewers remember visual metaphors.</li>
+        <li><strong>Derive the Fixed Window flaw mathematically:</strong> "At 11:59:59 a client sends 100 requests (window 1 = 100/100). At 12:00:00 they send 100 more (window 2 = 100/100). In the 2 seconds spanning midnight they sent 200 requests — 2× the limit." Math beats hand-waving.</li>
+        <li><strong>State your production recommendation:</strong> After explaining all 5, say "For this system I'd use Sliding Window Counter — it gives O(1) memory, approximately correct counts within 1%, and is what Cloudflare uses in production."</li>
+        <li><strong>Multi-dimension limits are common:</strong> Real systems have per-user AND per-endpoint AND per-tenant limits simultaneously. Redis key = <code>ratelimit:{user_id}:{endpoint}:{window}</code>. Check all dimensions in parallel with a Redis pipeline.</li>
+      </ul>
+    </article>
+
+    <!-- Mark Complete -->
+    <div class="complete-bar">
+      <p>Ready to move on? Mark this lesson complete to track your progress.</p>
+      <button class="complete-btn" id="completeBtn" onclick="markComplete()">
+        ✓ Mark as Complete
+      </button>
+    </div>
+
+    <!-- Prev / Next -->
+    <nav class="lesson-nav">
+                  <a class="nav-card prev" href="c23-l2.html">
+        <div class="nav-label">← Previous</div>
+        <div class="nav-title">Deep Dive — Distributed Trie &amp; Ranking</div>
+        <div class="nav-chapter">Design Typeahead Suggestion</div>
+      </a>
+      
+                  <a class="nav-card next" href="c24-l1.html">
+        <div class="nav-label">Next →</div>
+        <div class="nav-title">High-Level Design &amp; Redis Implementation</div>
+        <div class="nav-chapter">Design an API Rate Limiter</div>
+      </a>
+          </nav>
+
+  </main>
+</div>
+
+<script>
+function markComplete() {
+  const btn = document.getElementById('completeBtn');
+  btn.textContent = '✓ Completed!';
+  btn.classList.add('done');
+  // In a real app: AJAX call to save progress
+}
+
+// Keyboard navigation
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.key === 'ArrowLeft') window.location = 'lesson.php?c=23&l=2';
+      if (e.key === 'ArrowRight') window.location = 'lesson.php?c=24&l=1';
+  });
+</script>
+</body>
+</html>

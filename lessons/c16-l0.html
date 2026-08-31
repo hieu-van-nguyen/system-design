@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Requirements &amp; Estimations — Grokking System Design</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --brand:       #1F5EFF;
+  --brand-dark:  #1648CC;
+  --brand-light: #EEF4FF;
+  --text-primary:#0F172A;
+  --text-sec:    #475569;
+  --text-muted:  #94A3B8;
+  --border:      #E2E8F0;
+  --bg:          #F8FAFC;
+  --white:       #FFFFFF;
+  --radius:      12px;
+  --code-bg:     #0F172A;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text-primary);
+  line-height: 1.7;
+  min-height: 100vh;
+}
+
+/* ── TOP NAV ──────────────────────────────────────────────── */
+.topnav {
+  background: #fff;
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  box-shadow: 0 1px 4px rgba(0,0,0,.06);
+}
+.topnav-brand {
+  font-weight: 800;
+  font-size: 16px;
+  color: var(--brand);
+  text-decoration: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.topnav-brand span { color: var(--text-primary); }
+.topnav-back {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-sec);
+  text-decoration: none;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  transition: all .15s;
+}
+.topnav-back:hover { background: var(--brand-light); color: var(--brand); border-color: var(--brand); }
+.topnav-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* ── LAYOUT ───────────────────────────────────────────────── */
+.page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 40px 24px 80px;
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 40px;
+  align-items: start;
+}
+@media (max-width: 800px) {
+  .page { grid-template-columns: 1fr; }
+  .lesson-toc { display: none; }
+}
+
+/* ── LEFT: TABLE OF CONTENTS (Chapter lessons) ────────────── */
+.lesson-toc {
+  position: sticky;
+  top: 72px;
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.toc-header {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--text-muted);
+}
+.toc-chapter-title {
+  padding: 12px 16px 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.toc-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 16px;
+  font-size: 13px;
+  color: var(--text-sec);
+  text-decoration: none;
+  border-left: 3px solid transparent;
+  transition: all .1s;
+  line-height: 1.4;
+}
+.toc-item:hover { background: var(--bg); color: var(--brand); }
+.toc-item.active {
+  background: var(--brand-light);
+  color: var(--brand);
+  font-weight: 600;
+  border-left-color: var(--brand);
+}
+.toc-dot {
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 1.5px solid currentColor;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 9px; flex-shrink: 0; margin-top: 1px;
+}
+.toc-item.active .toc-dot {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+}
+
+/* ── RIGHT: MAIN CONTENT ──────────────────────────────────── */
+.lesson-content { min-width: 0; }
+
+.lesson-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+.lesson-breadcrumb a { color: var(--brand); text-decoration: none; }
+.lesson-breadcrumb a:hover { text-decoration: underline; }
+.bc-sep { color: var(--border); }
+
+.lesson-header {
+  margin-bottom: 32px;
+}
+.lesson-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 20px;
+  margin-bottom: 14px;
+  border: 1px solid;
+}
+.lesson-title {
+  font-size: clamp(22px, 4vw, 32px);
+  font-weight: 800;
+  line-height: 1.2;
+  color: var(--text-primary);
+  margin-bottom: 16px;
+}
+.lesson-meta {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.lesson-meta-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.lesson-type-badge {
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .4px;
+}
+.badge-lesson  { background: #EFF6FF; color: #1D4ED8; }
+.badge-quiz    { background: #FEF9C3; color: #A16207; }
+.badge-project { background: #F0FDF4; color: #16A34A; }
+
+/* ── OBJECTIVES BOX ───────────────────────────────────────── */
+.objectives {
+  background: linear-gradient(135deg, #EEF4FF, #F0F9FF);
+  border: 1px solid #BFDBFE;
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  margin-bottom: 32px;
+}
+.objectives h3 {
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--brand);
+  margin-bottom: 12px;
+}
+.objectives ul { list-style: none; }
+.objectives li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 14px;
+  color: var(--text-primary);
+  padding: 4px 0;
+}
+.objectives li::before {
+  content: '✓';
+  color: var(--brand);
+  font-weight: 800;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+/* ── SEPARATOR ────────────────────────────────────────────── */
+.content-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 32px 0;
+}
+
+/* ── ARTICLE BODY ─────────────────────────────────────────── */
+.lesson-body { font-size: 15px; }
+
+.lesson-body h2 {
+  font-size: 22px; font-weight: 700;
+  color: var(--text-primary);
+  margin: 32px 0 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.lesson-body h3 {
+  font-size: 17px; font-weight: 700;
+  color: var(--text-primary);
+  margin: 24px 0 10px;
+}
+.lesson-body h4 {
+  font-size: 15px; font-weight: 600;
+  color: var(--text-primary);
+  margin: 20px 0 8px;
+}
+.lesson-body p  { margin-bottom: 14px; color: var(--text-primary); }
+.lesson-body ul { margin: 12px 0 16px 20px; }
+.lesson-body li { margin-bottom: 6px; }
+
+.lesson-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 18px 0;
+  font-size: 14px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.lesson-body th {
+  background: #F1F5F9;
+  padding: 10px 14px;
+  text-align: left;
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--text-sec);
+  border-bottom: 1px solid var(--border);
+}
+.lesson-body td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.lesson-body tr:last-child td { border-bottom: none; }
+.lesson-body tr:hover td { background: var(--bg); }
+
+.lesson-body pre {
+  background: var(--code-bg);
+  border-radius: 10px;
+  padding: 20px;
+  overflow-x: auto;
+  margin: 16px 0;
+  position: relative;
+}
+.lesson-body code {
+  font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #E2E8F0;
+}
+.lesson-body p code, .lesson-body li code {
+  background: #F1F5F9;
+  color: #C2410C;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.lesson-body blockquote {
+  border-left: 4px solid var(--brand);
+  background: var(--brand-light);
+  padding: 14px 18px;
+  border-radius: 0 8px 8px 0;
+  margin: 18px 0;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.lesson-body strong { font-weight: 700; }
+.lesson-body em { font-style: italic; color: var(--text-sec); }
+.lesson-body hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
+
+/* ── PREV / NEXT NAV ──────────────────────────────────────── */
+.lesson-nav {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 48px;
+  padding-top: 32px;
+  border-top: 1px solid var(--border);
+}
+.nav-card {
+  display: flex;
+  flex-direction: column;
+  padding: 16px 20px;
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  text-decoration: none;
+  color: inherit;
+  transition: all .15s;
+  min-width: 0;
+}
+.nav-card:hover {
+  border-color: var(--brand);
+  box-shadow: 0 4px 14px rgba(31,94,255,.12);
+}
+.nav-card.next { text-align: right; }
+.nav-card.empty { visibility: hidden; }
+.nav-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.nav-card.next .nav-label { justify-content: flex-end; }
+.nav-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.nav-chapter {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── MARK COMPLETE ────────────────────────────────────────── */
+.complete-bar {
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  margin-top: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.complete-bar p {
+  font-size: 14px;
+  color: var(--text-sec);
+  margin: 0;
+}
+.complete-btn {
+  padding: 10px 22px;
+  background: #16A34A;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background .15s;
+  white-space: nowrap;
+}
+.complete-btn:hover { background: #15803D; }
+.complete-btn.done {
+  background: #F0FDF4;
+  color: #16A34A;
+  border: 1.5px solid #BBF7D0;
+  cursor: default;
+}
+</style>
+</head>
+<body>
+
+<!-- ─── TOP NAV ───────────────────────────────────────────────────── -->
+<nav class="topnav">
+  <a class="topnav-brand" href="../index.php">
+    📐 <span>Grokking System Design</span>
+  </a>
+  <div class="topnav-progress">
+    Lesson 1 of 4 in this chapter
+  </div>
+  <a class="topnav-back" href="../index.php">← Back to Roadmap</a>
+</nav>
+
+<!-- ─── PAGE LAYOUT ───────────────────────────────────────────────── -->
+<div class="page">
+
+  <!-- LEFT: CHAPTER TOC ─────────────────────────────────────────── -->
+  <aside class="lesson-toc">
+    <div class="toc-header">Chapter 16</div>
+    <div class="toc-chapter-title">
+      🔗 Design a URL Shortener (TinyURL)    </div>
+        <a class="toc-item active"
+       href="c16-l0.html">
+      <div class="toc-dot">✓</div>
+      <span>Requirements &amp; Estimations</span>
+    </a>
+        <a class="toc-item "
+       href="c16-l1.html">
+      <div class="toc-dot">▶</div>
+      <span>High-Level Design &amp; API</span>
+    </a>
+        <a class="toc-item "
+       href="c16-l2.html">
+      <div class="toc-dot">▶</div>
+      <span>Deep Dive — Key Generation &amp; Encoding</span>
+    </a>
+        <a class="toc-item "
+       href="c16-l3.html">
+      <div class="toc-dot">▶</div>
+      <span>Deep Dive — DB Partitioning &amp; Caching</span>
+    </a>
+      </aside>
+
+  <!-- RIGHT: LESSON CONTENT ─────────────────────────────────────── -->
+  <main class="lesson-content">
+
+    <!-- Breadcrumb -->
+    <div class="lesson-breadcrumb">
+      <a href="../index.php">Roadmap</a>
+      <span class="bc-sep">›</span>
+      <span>Design a URL Shortener (TinyURL)</span>
+      <span class="bc-sep">›</span>
+      <span>Requirements &amp; Estimations</span>
+    </div>
+
+    <!-- Lesson Header -->
+    <div class="lesson-header">
+      <div class="lesson-tag" style="background:#EFF6FF;color:#1D4ED8;border-color:#BFDBFE">
+        🔗 Design Problems      </div>
+      <h1 class="lesson-title">Requirements &amp; Estimations</h1>
+      <div class="lesson-meta">
+        <div class="lesson-meta-item">
+          <span class="lesson-type-badge badge-lesson">lesson</span>
+        </div>
+        <div class="lesson-meta-item">⏱ 8 min</div>
+        <div class="lesson-meta-item">📖 Chapter 16, Lesson 1</div>
+      </div>
+    </div>
+
+    <!-- Learning Objectives -->
+    <div class="objectives">
+      <h3>🎯 Learning Objectives</h3>
+      <ul>
+                <li>Scope functional and non-functional requirements using the FAANG interview framework</li>
+                <li>Perform back-of-envelope estimation for QPS, storage, and bandwidth</li>
+                <li>Identify the five key design decisions that drive all subsequent architecture choices</li>
+              </ul>
+    </div>
+
+    <div class="content-divider"></div>
+
+    <!-- Lesson Body -->
+    <article class="lesson-body">
+      <h2>Clarifying Requirements (First 5 Minutes)</h2><p>In a FAANG interview, spend the first 5 minutes defining scope. Use these questions:</p><pre><code>&quot;Should I support custom aliases?&quot;           → Yes
+&quot;Do URLs expire? Who controls TTL?&quot;          → User-defined, default 1 year
+&quot;Do we need analytics (click tracking)?&quot;     → Yes — clicks, geography, device
+&quot;Should the same long URL always produce
+  the same short code? (dedup)&quot;              → Yes, per user
+&quot;Do we need user authentication?&quot;            → Out of scope for now
+&quot;What&#039;s the expected scale?&quot;                 → 100M new URLs/day, 10B reads/day</code></pre><h2>Functional Requirements</h2><table><tr><th>Requirement</th><th>Details</th><th>Priority</th></tr><tr><td>Shorten URL</td><td>Given long URL → unique 7-char short code</td><td>Must</td></tr><tr><td>Redirect</td><td>Short URL → 302 redirect to long URL</td><td>Must</td></tr><tr><td>Custom alias</td><td>User-defined short code (e.g. <code>tiny.url/my-brand</code>)</td><td>Should</td></tr><tr><td>Expiry / TTL</td><td>URLs expire after configurable time (default: 1 year)</td><td>Should</td></tr><tr><td>Click analytics</td><td>Count clicks, country, device, referer per URL</td><td>Nice</td></tr><tr><td>Delete URL</td><td>Owner can deactivate a short URL</td><td>Nice</td></tr></table><p><strong>Explicitly out of scope:</strong> User accounts (auth/login), real-time analytics dashboard, AB testing.</p><h2>Non-Functional Requirements</h2><table><tr><td>Property</td><td>Target</td><td>Rationale</td></tr><tr><td>Availability</td><td>99.99% (52 min downtime/year)</td><td>Redirects are on critical path — broken links = lost revenue</td></tr><tr><td>Redirect latency</td><td>p99 &lt; 20ms globally</td><td>Users abandon if redirect takes &gt;100ms</td></tr><tr><td>Write latency</td><td>p99 &lt; 200ms</td><td>URL creation is infrequent, tolerate more latency</td></tr><tr><td>Read:Write ratio</td><td>~8,000:1 (after caching)</td><td>Extreme read skew drives caching strategy</td></tr><tr><td>Durability</td><td>No URL loss after creation</td><td>URL deletion = intentional only</td></tr><tr><td>Eventual consistency</td><td>Acceptable for click counts</td><td>Counts don&#039;t need to be real-time exact</td></tr></table><h2>Back-of-Envelope Estimation</h2><pre><code>Daily scale:
+  New URLs:    100M / day
+  Redirects: 10,000M / day (10B)
+  Read:Write = 100:1
+
+QPS:
+  Write QPS = 100,000,000 / 86,400        ≈ 1,200 writes/sec
+  Read  QPS = 10,000,000,000 / 86,400     ≈ 115,000 reads/sec
+  Peak  QPS = 3x average                  ≈ 345,000 reads/sec
+
+Short code namespace:
+  7 chars × base62 = 62^7 = 3.5 trillion unique codes
+  At 1,200 writes/sec → 37.8 billion codes/year
+  3.5 trillion / 37.8 billion ≈ 92 years of capacity ✓
+
+Storage (5 years):
+  Per record: ~500 bytes (short_code + long_url avg 200 chars + metadata)
+  Records:    1,200/sec × 86,400 × 365 × 5 = 189 billion records
+  Total:      189B × 500 bytes ≈ 95 TB
+
+Cache sizing (80/20 rule):
+  20% of URLs drive 80% of traffic
+  20% of 189B = 37.8B URLs... but hot URLs are much smaller subset
+  Top 10M hot URLs × 500 bytes = 5 GB → fits in a single Redis node
+  Top 100M hot URLs × 500 bytes = 50 GB → Redis cluster
+
+Bandwidth:
+  Read:  115,000 req/sec × 500 bytes response = 57 MB/s outbound
+  Write: 1,200 req/sec × 2 KB request = 2.4 MB/s inbound</code></pre><h2>The Five Key Design Decisions</h2><p>Before drawing any architecture, raise these with the interviewer:</p><pre><code>1. Short code generation strategy
+   Hash-based (MD5 + truncate):  Simple, collision-prone, predictable
+   Snowflake ID + base62:        No collisions, distributed, recommended
+   Pre-generated pool:           Complex ops, no runtime generation needed
+
+2. 301 vs 302 redirect
+   301 Permanent: browser caches → lower server load, breaks click tracking
+   302 Temporary: every click hits server → enables full analytics
+   Decision: 302 for analytics capability
+
+3. Database choice
+   PostgreSQL:  Simple, ACID, can&#039;t scale to 95 TB
+   Cassandra:   High write throughput, TTL support, horizontal scale
+   DynamoDB:    Managed Cassandra alternative, pay-per-request
+   Decision: Cassandra (or DynamoDB if managed is preferred)
+
+4. Caching strategy
+   Redis with read-through cache, 24h TTL
+   CDN for top redirects (edge caching at 60+ PoPs)
+   Negative cache for non-existent/expired codes
+
+5. URL deduplication
+   Same long URL from same user → same short code?
+   Option A: Always new code (simple, bloats DB)
+   Option B: Hash long URL, check reverse index (dedup, extra lookup)
+   Decision: Dedup with reverse index for same user</code></pre><blockquote>💡 <strong>FAANG tip:</strong> Interviewers want to see you raise these decisions proactively, not wait to be asked. Naming the 301 vs 302 tradeoff and the Snowflake ID approach in the first 10 minutes signals you&#039;ve designed real URL shorteners before.</blockquote>    </article>
+
+    <!-- Mark Complete -->
+    <div class="complete-bar">
+      <p>Ready to move on? Mark this lesson complete to track your progress.</p>
+      <button class="complete-btn" id="completeBtn" onclick="markComplete()">
+        ✓ Mark as Complete
+      </button>
+    </div>
+
+    <!-- Prev / Next -->
+    <nav class="lesson-nav">
+                  <a class="nav-card prev" href="c15-l1.html">
+        <div class="nav-label">← Previous</div>
+        <div class="nav-title">Leader Election with Zookeeper / etcd</div>
+        <div class="nav-chapter">Quorum &amp; Leader Election</div>
+      </a>
+      
+                  <a class="nav-card next" href="c16-l1.html">
+        <div class="nav-label">Next →</div>
+        <div class="nav-title">High-Level Design &amp; API</div>
+        <div class="nav-chapter">Design a URL Shortener (TinyURL)</div>
+      </a>
+          </nav>
+
+  </main>
+</div>
+
+<script>
+function markComplete() {
+  const btn = document.getElementById('completeBtn');
+  btn.textContent = '✓ Completed!';
+  btn.classList.add('done');
+  // In a real app: AJAX call to save progress
+}
+
+// Keyboard navigation
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.key === 'ArrowLeft') window.location = 'lesson.php?c=15&l=1';
+      if (e.key === 'ArrowRight') window.location = 'lesson.php?c=16&l=1';
+  });
+</script>
+</body>
+</html>

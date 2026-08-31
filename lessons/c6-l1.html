@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Partitioning Methods (Range, Hash, Directory) — Grokking System Design</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --brand:       #1F5EFF;
+  --brand-dark:  #1648CC;
+  --brand-light: #EEF4FF;
+  --text-primary:#0F172A;
+  --text-sec:    #475569;
+  --text-muted:  #94A3B8;
+  --border:      #E2E8F0;
+  --bg:          #F8FAFC;
+  --white:       #FFFFFF;
+  --radius:      12px;
+  --code-bg:     #0F172A;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text-primary);
+  line-height: 1.7;
+  min-height: 100vh;
+}
+
+/* ── TOP NAV ──────────────────────────────────────────────── */
+.topnav {
+  background: #fff;
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  box-shadow: 0 1px 4px rgba(0,0,0,.06);
+}
+.topnav-brand {
+  font-weight: 800;
+  font-size: 16px;
+  color: var(--brand);
+  text-decoration: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.topnav-brand span { color: var(--text-primary); }
+.topnav-back {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-sec);
+  text-decoration: none;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  transition: all .15s;
+}
+.topnav-back:hover { background: var(--brand-light); color: var(--brand); border-color: var(--brand); }
+.topnav-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* ── LAYOUT ───────────────────────────────────────────────── */
+.page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 40px 24px 80px;
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 40px;
+  align-items: start;
+}
+@media (max-width: 800px) {
+  .page { grid-template-columns: 1fr; }
+  .lesson-toc { display: none; }
+}
+
+/* ── LEFT: TABLE OF CONTENTS (Chapter lessons) ────────────── */
+.lesson-toc {
+  position: sticky;
+  top: 72px;
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.toc-header {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--text-muted);
+}
+.toc-chapter-title {
+  padding: 12px 16px 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.toc-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 16px;
+  font-size: 13px;
+  color: var(--text-sec);
+  text-decoration: none;
+  border-left: 3px solid transparent;
+  transition: all .1s;
+  line-height: 1.4;
+}
+.toc-item:hover { background: var(--bg); color: var(--brand); }
+.toc-item.active {
+  background: var(--brand-light);
+  color: var(--brand);
+  font-weight: 600;
+  border-left-color: var(--brand);
+}
+.toc-dot {
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 1.5px solid currentColor;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 9px; flex-shrink: 0; margin-top: 1px;
+}
+.toc-item.active .toc-dot {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+}
+
+/* ── RIGHT: MAIN CONTENT ──────────────────────────────────── */
+.lesson-content { min-width: 0; }
+
+.lesson-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+.lesson-breadcrumb a { color: var(--brand); text-decoration: none; }
+.lesson-breadcrumb a:hover { text-decoration: underline; }
+.bc-sep { color: var(--border); }
+
+.lesson-header {
+  margin-bottom: 32px;
+}
+.lesson-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 20px;
+  margin-bottom: 14px;
+  border: 1px solid;
+}
+.lesson-title {
+  font-size: clamp(22px, 4vw, 32px);
+  font-weight: 800;
+  line-height: 1.2;
+  color: var(--text-primary);
+  margin-bottom: 16px;
+}
+.lesson-meta {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.lesson-meta-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.lesson-type-badge {
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .4px;
+}
+.badge-lesson  { background: #EFF6FF; color: #1D4ED8; }
+.badge-quiz    { background: #FEF9C3; color: #A16207; }
+.badge-project { background: #F0FDF4; color: #16A34A; }
+
+/* ── OBJECTIVES BOX ───────────────────────────────────────── */
+.objectives {
+  background: linear-gradient(135deg, #EEF4FF, #F0F9FF);
+  border: 1px solid #BFDBFE;
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  margin-bottom: 32px;
+}
+.objectives h3 {
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--brand);
+  margin-bottom: 12px;
+}
+.objectives ul { list-style: none; }
+.objectives li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 14px;
+  color: var(--text-primary);
+  padding: 4px 0;
+}
+.objectives li::before {
+  content: '✓';
+  color: var(--brand);
+  font-weight: 800;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+/* ── SEPARATOR ────────────────────────────────────────────── */
+.content-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 32px 0;
+}
+
+/* ── ARTICLE BODY ─────────────────────────────────────────── */
+.lesson-body { font-size: 15px; }
+
+.lesson-body h2 {
+  font-size: 22px; font-weight: 700;
+  color: var(--text-primary);
+  margin: 32px 0 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.lesson-body h3 {
+  font-size: 17px; font-weight: 700;
+  color: var(--text-primary);
+  margin: 24px 0 10px;
+}
+.lesson-body h4 {
+  font-size: 15px; font-weight: 600;
+  color: var(--text-primary);
+  margin: 20px 0 8px;
+}
+.lesson-body p  { margin-bottom: 14px; color: var(--text-primary); }
+.lesson-body ul { margin: 12px 0 16px 20px; }
+.lesson-body li { margin-bottom: 6px; }
+
+.lesson-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 18px 0;
+  font-size: 14px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.lesson-body th {
+  background: #F1F5F9;
+  padding: 10px 14px;
+  text-align: left;
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--text-sec);
+  border-bottom: 1px solid var(--border);
+}
+.lesson-body td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.lesson-body tr:last-child td { border-bottom: none; }
+.lesson-body tr:hover td { background: var(--bg); }
+
+.lesson-body pre {
+  background: var(--code-bg);
+  border-radius: 10px;
+  padding: 20px;
+  overflow-x: auto;
+  margin: 16px 0;
+  position: relative;
+}
+.lesson-body code {
+  font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #E2E8F0;
+}
+.lesson-body p code, .lesson-body li code {
+  background: #F1F5F9;
+  color: #C2410C;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.lesson-body blockquote {
+  border-left: 4px solid var(--brand);
+  background: var(--brand-light);
+  padding: 14px 18px;
+  border-radius: 0 8px 8px 0;
+  margin: 18px 0;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.lesson-body strong { font-weight: 700; }
+.lesson-body em { font-style: italic; color: var(--text-sec); }
+.lesson-body hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
+
+/* ── PREV / NEXT NAV ──────────────────────────────────────── */
+.lesson-nav {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 48px;
+  padding-top: 32px;
+  border-top: 1px solid var(--border);
+}
+.nav-card {
+  display: flex;
+  flex-direction: column;
+  padding: 16px 20px;
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  text-decoration: none;
+  color: inherit;
+  transition: all .15s;
+  min-width: 0;
+}
+.nav-card:hover {
+  border-color: var(--brand);
+  box-shadow: 0 4px 14px rgba(31,94,255,.12);
+}
+.nav-card.next { text-align: right; }
+.nav-card.empty { visibility: hidden; }
+.nav-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.nav-card.next .nav-label { justify-content: flex-end; }
+.nav-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.nav-chapter {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── MARK COMPLETE ────────────────────────────────────────── */
+.complete-bar {
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  margin-top: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.complete-bar p {
+  font-size: 14px;
+  color: var(--text-sec);
+  margin: 0;
+}
+.complete-btn {
+  padding: 10px 22px;
+  background: #16A34A;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background .15s;
+  white-space: nowrap;
+}
+.complete-btn:hover { background: #15803D; }
+.complete-btn.done {
+  background: #F0FDF4;
+  color: #16A34A;
+  border: 1.5px solid #BBF7D0;
+  cursor: default;
+}
+</style>
+</head>
+<body>
+
+<!-- ─── TOP NAV ───────────────────────────────────────────────────── -->
+<nav class="topnav">
+  <a class="topnav-brand" href="../index.php">
+    📐 <span>Grokking System Design</span>
+  </a>
+  <div class="topnav-progress">
+    Lesson 2 of 3 in this chapter
+  </div>
+  <a class="topnav-back" href="../index.php">← Back to Roadmap</a>
+</nav>
+
+<!-- ─── PAGE LAYOUT ───────────────────────────────────────────────── -->
+<div class="page">
+
+  <!-- LEFT: CHAPTER TOC ─────────────────────────────────────────── -->
+  <aside class="lesson-toc">
+    <div class="toc-header">Chapter 06</div>
+    <div class="toc-chapter-title">
+      🗄️ Data Partitioning    </div>
+        <a class="toc-item "
+       href="c6-l0.html">
+      <div class="toc-dot">▶</div>
+      <span>Horizontal vs Vertical Partitioning</span>
+    </a>
+        <a class="toc-item active"
+       href="c6-l1.html">
+      <div class="toc-dot">✓</div>
+      <span>Partitioning Methods (Range, Hash, Directory)</span>
+    </a>
+        <a class="toc-item "
+       href="c6-l2.html">
+      <div class="toc-dot">▶</div>
+      <span>Partitioning Criteria &amp; Common Problems</span>
+    </a>
+      </aside>
+
+  <!-- RIGHT: LESSON CONTENT ─────────────────────────────────────── -->
+  <main class="lesson-content">
+
+    <!-- Breadcrumb -->
+    <div class="lesson-breadcrumb">
+      <a href="../index.php">Roadmap</a>
+      <span class="bc-sep">›</span>
+      <span>Data Partitioning</span>
+      <span class="bc-sep">›</span>
+      <span>Partitioning Methods (Range, Hash, Directory)</span>
+    </div>
+
+    <!-- Lesson Header -->
+    <div class="lesson-header">
+      <div class="lesson-tag" style="background:#F0FDF4;color:#16A34A;border-color:#BBF7D0">
+        🗄️ Fundamentals      </div>
+      <h1 class="lesson-title">Partitioning Methods (Range, Hash, Directory)</h1>
+      <div class="lesson-meta">
+        <div class="lesson-meta-item">
+          <span class="lesson-type-badge badge-lesson">lesson</span>
+        </div>
+        <div class="lesson-meta-item">⏱ 10 min</div>
+        <div class="lesson-meta-item">📖 Chapter 6, Lesson 2</div>
+      </div>
+    </div>
+
+    <!-- Learning Objectives -->
+    <div class="objectives">
+      <h3>🎯 Learning Objectives</h3>
+      <ul>
+                <li>Implement Range, Hash, Directory, and Geographic partitioning schemes</li>
+                <li>Apply consistent hashing to minimise data movement when nodes are added or removed</li>
+                <li>Select the right partitioning method for a given query pattern</li>
+              </ul>
+    </div>
+
+    <div class="content-divider"></div>
+
+    <!-- Lesson Body -->
+    <article class="lesson-body">
+      <h2>Four Partitioning Methods</h2><h3>Method 1 — Range-Based Partitioning</h3><p>Assign rows to shards based on a range of the shard key value.</p><pre><code>Shard 0: user_id  [0,        25,000,000)
+Shard 1: user_id  [25M,      50,000,000)
+Shard 2: user_id  [50M,      75,000,000)
+Shard 3: user_id  [75M,     100,000,000)</code></pre><p><strong>Query efficiency:</strong> Range scans are fast — <code>WHERE user_id BETWEEN 25M AND 40M</code> hits only Shard 1.</p><p>✅ Excellent for range queries and time-series data</p><p>✅ Easy to reason about which shard holds which data</p><p>❌ <strong>Sequential insert hotspot:</strong> If shard key is a timestamp or auto-increment ID, all new writes go to the last shard — hot partition</p><p>❌ Uneven distribution if data is not uniformly distributed (e.g., most users signed up recently)</p><p><strong>When to use:</strong> Time-series data with time-range queries. HBase, DynamoDB, Bigtable all use range partitioning internally.</p><h3>Method 2 — Hash-Based Partitioning</h3><pre><code>shard_id = hash(shard_key) % N_shards
+
+user_id = 12345678
+hash(12345678) = 0xABCDE  →  0xABCDE % 4 = 2  →  Shard 2</code></pre><p>✅ Uniform distribution — each shard gets ~1/N of the data</p><p>✅ Eliminates sequential insert hotspots</p><p>❌ Range queries require scatter-gather (scan all shards)</p><p>❌ <strong>Resharding nightmare:</strong> Adding a shard (N → N+1) remaps <code>hash(key) % N+1</code> for almost all keys → massive data migration</p><p><strong>Critical upgrade — Consistent Hashing:</strong></p><pre><code>Place shards on a hash ring [0, 2^32)
+Each key maps to the first shard clockwise from hash(key)
+Adding a shard: only 1/N of keys migrate
+Removing a shard: only that shard&#039;s keys redistribute to the next shard</code></pre><p>When to use: User data, social graph, any data without range query requirements. Cassandra, DynamoDB, Riak use consistent hashing.</p><h3>Method 3 — Directory-Based Partitioning (Lookup Table)</h3><p>A central routing service maintains a mapping table: key → shard.</p><pre><code>Directory service:
+  user_id 1   → Shard A
+  user_id 2   → Shard C
+  user_id 3   → Shard A
+  user_id 4   → Shard B
+  ...
+
+Application:  lookup(user_id) → shard ID → query that shard</code></pre><p>✅ Maximum flexibility — move any row to any shard without changing hash/range rules</p><p>✅ Trivial to handle special cases (move a hot user to a dedicated shard)</p><p>❌ Directory service is a SPOF — must be highly available and cached</p><p>❌ Extra network hop on every query</p><p>❌ Operational complexity of keeping directory consistent</p><p><strong>When to use:</strong> Multi-tenant SaaS where tenants have wildly different sizes; or when you need to move specific tenants between shards (e.g., large enterprise customer gets dedicated shard).</p><h3>Method 4 — Geographic Partitioning</h3><p>Partition by user location. Data stays within the user&#039;s region (compliance, latency).</p><pre><code>EU users  → EU shard cluster (Frankfurt / Dublin)
+US users  → US shard cluster (Virginia / Oregon)
+APAC users → APAC shard cluster (Singapore / Tokyo)</code></pre><p>✅ Low latency (user&#039;s data co-located with the user)</p><p>✅ Data sovereignty (GDPR: EU user data stays in EU)</p><p>❌ Imbalanced if user distribution is uneven (all US → all writes to US shards)</p><p>❌ Cross-region queries are expensive (friends in different regions)</p><h2>Partitioning Method Comparison</h2><table><tr><th>Method</th><th>Query type</th><th>Distribution</th><th>Resharding</th><th>Complexity</th></tr><tr><td>Range</td><td>Range scans ✅</td><td>Uneven ❌</td><td>Easy</td><td>Low</td></tr><tr><td>Hash (% N)</td><td>Point lookups ✅</td><td>Even ✅</td><td>Expensive ❌</td><td>Low</td></tr><tr><td>Consistent Hash</td><td>Point lookups ✅</td><td>Even ✅</td><td>Cheap ✅</td><td>Medium</td></tr><tr><td>Directory</td><td>Any ✅</td><td>Manual</td><td>Easy</td><td>High</td></tr><tr><td>Geographic</td><td>Regional ✅</td><td>Uneven ❌</td><td>Medium</td><td>Medium</td></tr></table><h2>Composite Partitioning</h2><p>Combine two methods for best-of-both:</p><pre><code>First partition by region (geographic):
+  EU users → EU cluster
+
+Then within each region, partition by hash(user_id):
+  EU Shard 0: hash(user_id) % 4 = 0
+  EU Shard 1: hash(user_id) % 4 = 1
+  ...</code></pre><p>This is how most large-scale systems actually work — geographic routing first, hash partitioning within a region.</p><blockquote>💡 <strong>Interview tip:</strong> The default answer for a large-scale user-centric system is <strong>consistent hashing on user_id</strong>. Only switch to range partitioning if range queries are critical (time-series). Mention geographic partitioning when the interviewer asks about multi-region or data residency requirements.</blockquote>    </article>
+
+    <!-- Mark Complete -->
+    <div class="complete-bar">
+      <p>Ready to move on? Mark this lesson complete to track your progress.</p>
+      <button class="complete-btn" id="completeBtn" onclick="markComplete()">
+        ✓ Mark as Complete
+      </button>
+    </div>
+
+    <!-- Prev / Next -->
+    <nav class="lesson-nav">
+                  <a class="nav-card prev" href="c6-l0.html">
+        <div class="nav-label">← Previous</div>
+        <div class="nav-title">Horizontal vs Vertical Partitioning</div>
+        <div class="nav-chapter">Data Partitioning</div>
+      </a>
+      
+                  <a class="nav-card next" href="c6-l2.html">
+        <div class="nav-label">Next →</div>
+        <div class="nav-title">Partitioning Criteria &amp; Common Problems</div>
+        <div class="nav-chapter">Data Partitioning</div>
+      </a>
+          </nav>
+
+  </main>
+</div>
+
+<script>
+function markComplete() {
+  const btn = document.getElementById('completeBtn');
+  btn.textContent = '✓ Completed!';
+  btn.classList.add('done');
+  // In a real app: AJAX call to save progress
+}
+
+// Keyboard navigation
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.key === 'ArrowLeft') window.location = 'lesson.php?c=6&l=0';
+      if (e.key === 'ArrowRight') window.location = 'lesson.php?c=6&l=2';
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Requirements &amp; High-Level Design — Grokking System Design</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --brand:       #1F5EFF;
+  --brand-dark:  #1648CC;
+  --brand-light: #EEF4FF;
+  --text-primary:#0F172A;
+  --text-sec:    #475569;
+  --text-muted:  #94A3B8;
+  --border:      #E2E8F0;
+  --bg:          #F8FAFC;
+  --white:       #FFFFFF;
+  --radius:      12px;
+  --code-bg:     #0F172A;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text-primary);
+  line-height: 1.7;
+  min-height: 100vh;
+}
+
+/* ── TOP NAV ──────────────────────────────────────────────── */
+.topnav {
+  background: #fff;
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  box-shadow: 0 1px 4px rgba(0,0,0,.06);
+}
+.topnav-brand {
+  font-weight: 800;
+  font-size: 16px;
+  color: var(--brand);
+  text-decoration: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.topnav-brand span { color: var(--text-primary); }
+.topnav-back {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-sec);
+  text-decoration: none;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  transition: all .15s;
+}
+.topnav-back:hover { background: var(--brand-light); color: var(--brand); border-color: var(--brand); }
+.topnav-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* ── LAYOUT ───────────────────────────────────────────────── */
+.page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 40px 24px 80px;
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 40px;
+  align-items: start;
+}
+@media (max-width: 800px) {
+  .page { grid-template-columns: 1fr; }
+  .lesson-toc { display: none; }
+}
+
+/* ── LEFT: TABLE OF CONTENTS (Chapter lessons) ────────────── */
+.lesson-toc {
+  position: sticky;
+  top: 72px;
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.toc-header {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--text-muted);
+}
+.toc-chapter-title {
+  padding: 12px 16px 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.toc-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 16px;
+  font-size: 13px;
+  color: var(--text-sec);
+  text-decoration: none;
+  border-left: 3px solid transparent;
+  transition: all .1s;
+  line-height: 1.4;
+}
+.toc-item:hover { background: var(--bg); color: var(--brand); }
+.toc-item.active {
+  background: var(--brand-light);
+  color: var(--brand);
+  font-weight: 600;
+  border-left-color: var(--brand);
+}
+.toc-dot {
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 1.5px solid currentColor;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 9px; flex-shrink: 0; margin-top: 1px;
+}
+.toc-item.active .toc-dot {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+}
+
+/* ── RIGHT: MAIN CONTENT ──────────────────────────────────── */
+.lesson-content { min-width: 0; }
+
+.lesson-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+.lesson-breadcrumb a { color: var(--brand); text-decoration: none; }
+.lesson-breadcrumb a:hover { text-decoration: underline; }
+.bc-sep { color: var(--border); }
+
+.lesson-header {
+  margin-bottom: 32px;
+}
+.lesson-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 20px;
+  margin-bottom: 14px;
+  border: 1px solid;
+}
+.lesson-title {
+  font-size: clamp(22px, 4vw, 32px);
+  font-weight: 800;
+  line-height: 1.2;
+  color: var(--text-primary);
+  margin-bottom: 16px;
+}
+.lesson-meta {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.lesson-meta-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+.lesson-type-badge {
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .4px;
+}
+.badge-lesson  { background: #EFF6FF; color: #1D4ED8; }
+.badge-quiz    { background: #FEF9C3; color: #A16207; }
+.badge-project { background: #F0FDF4; color: #16A34A; }
+
+/* ── OBJECTIVES BOX ───────────────────────────────────────── */
+.objectives {
+  background: linear-gradient(135deg, #EEF4FF, #F0F9FF);
+  border: 1px solid #BFDBFE;
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  margin-bottom: 32px;
+}
+.objectives h3 {
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--brand);
+  margin-bottom: 12px;
+}
+.objectives ul { list-style: none; }
+.objectives li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 14px;
+  color: var(--text-primary);
+  padding: 4px 0;
+}
+.objectives li::before {
+  content: '✓';
+  color: var(--brand);
+  font-weight: 800;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+/* ── SEPARATOR ────────────────────────────────────────────── */
+.content-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 32px 0;
+}
+
+/* ── ARTICLE BODY ─────────────────────────────────────────── */
+.lesson-body { font-size: 15px; }
+
+.lesson-body h2 {
+  font-size: 22px; font-weight: 700;
+  color: var(--text-primary);
+  margin: 32px 0 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.lesson-body h3 {
+  font-size: 17px; font-weight: 700;
+  color: var(--text-primary);
+  margin: 24px 0 10px;
+}
+.lesson-body h4 {
+  font-size: 15px; font-weight: 600;
+  color: var(--text-primary);
+  margin: 20px 0 8px;
+}
+.lesson-body p  { margin-bottom: 14px; color: var(--text-primary); }
+.lesson-body ul { margin: 12px 0 16px 20px; }
+.lesson-body li { margin-bottom: 6px; }
+
+.lesson-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 18px 0;
+  font-size: 14px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.lesson-body th {
+  background: #F1F5F9;
+  padding: 10px 14px;
+  text-align: left;
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--text-sec);
+  border-bottom: 1px solid var(--border);
+}
+.lesson-body td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.lesson-body tr:last-child td { border-bottom: none; }
+.lesson-body tr:hover td { background: var(--bg); }
+
+.lesson-body pre {
+  background: var(--code-bg);
+  border-radius: 10px;
+  padding: 20px;
+  overflow-x: auto;
+  margin: 16px 0;
+  position: relative;
+}
+.lesson-body code {
+  font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #E2E8F0;
+}
+.lesson-body p code, .lesson-body li code {
+  background: #F1F5F9;
+  color: #C2410C;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.lesson-body blockquote {
+  border-left: 4px solid var(--brand);
+  background: var(--brand-light);
+  padding: 14px 18px;
+  border-radius: 0 8px 8px 0;
+  margin: 18px 0;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.lesson-body strong { font-weight: 700; }
+.lesson-body em { font-style: italic; color: var(--text-sec); }
+.lesson-body hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
+
+/* ── PREV / NEXT NAV ──────────────────────────────────────── */
+.lesson-nav {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 48px;
+  padding-top: 32px;
+  border-top: 1px solid var(--border);
+}
+.nav-card {
+  display: flex;
+  flex-direction: column;
+  padding: 16px 20px;
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  text-decoration: none;
+  color: inherit;
+  transition: all .15s;
+  min-width: 0;
+}
+.nav-card:hover {
+  border-color: var(--brand);
+  box-shadow: 0 4px 14px rgba(31,94,255,.12);
+}
+.nav-card.next { text-align: right; }
+.nav-card.empty { visibility: hidden; }
+.nav-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.nav-card.next .nav-label { justify-content: flex-end; }
+.nav-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.nav-chapter {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── MARK COMPLETE ────────────────────────────────────────── */
+.complete-bar {
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  margin-top: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.complete-bar p {
+  font-size: 14px;
+  color: var(--text-sec);
+  margin: 0;
+}
+.complete-btn {
+  padding: 10px 22px;
+  background: #16A34A;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background .15s;
+  white-space: nowrap;
+}
+.complete-btn:hover { background: #15803D; }
+.complete-btn.done {
+  background: #F0FDF4;
+  color: #16A34A;
+  border: 1.5px solid #BBF7D0;
+  cursor: default;
+}
+</style>
+</head>
+<body>
+
+<!-- ─── TOP NAV ───────────────────────────────────────────────────── -->
+<nav class="topnav">
+  <a class="topnav-brand" href="../index.php">
+    📐 <span>Grokking System Design</span>
+  </a>
+  <div class="topnav-progress">
+    Lesson 1 of 3 in this chapter
+  </div>
+  <a class="topnav-back" href="../index.php">← Back to Roadmap</a>
+</nav>
+
+<!-- ─── PAGE LAYOUT ───────────────────────────────────────────────── -->
+<div class="page">
+
+  <!-- LEFT: CHAPTER TOC ─────────────────────────────────────────── -->
+  <aside class="lesson-toc">
+    <div class="toc-header">Chapter 23</div>
+    <div class="toc-chapter-title">
+      🔍 Design Typeahead Suggestion    </div>
+        <a class="toc-item active"
+       href="c23-l0.html">
+      <div class="toc-dot">✓</div>
+      <span>Requirements &amp; High-Level Design</span>
+    </a>
+        <a class="toc-item "
+       href="c23-l1.html">
+      <div class="toc-dot">▶</div>
+      <span>Deep Dive — Trie Data Structure</span>
+    </a>
+        <a class="toc-item "
+       href="c23-l2.html">
+      <div class="toc-dot">▶</div>
+      <span>Deep Dive — Distributed Trie &amp; Ranking</span>
+    </a>
+      </aside>
+
+  <!-- RIGHT: LESSON CONTENT ─────────────────────────────────────── -->
+  <main class="lesson-content">
+
+    <!-- Breadcrumb -->
+    <div class="lesson-breadcrumb">
+      <a href="../index.php">Roadmap</a>
+      <span class="bc-sep">›</span>
+      <span>Design Typeahead Suggestion</span>
+      <span class="bc-sep">›</span>
+      <span>Requirements &amp; High-Level Design</span>
+    </div>
+
+    <!-- Lesson Header -->
+    <div class="lesson-header">
+      <div class="lesson-tag" style="background:#EFF6FF;color:#1D4ED8;border-color:#BFDBFE">
+        🔍 Design Problems      </div>
+      <h1 class="lesson-title">Requirements &amp; High-Level Design</h1>
+      <div class="lesson-meta">
+        <div class="lesson-meta-item">
+          <span class="lesson-type-badge badge-lesson">lesson</span>
+        </div>
+        <div class="lesson-meta-item">⏱ 8 min</div>
+        <div class="lesson-meta-item">📖 Chapter 23, Lesson 1</div>
+      </div>
+    </div>
+
+    <!-- Learning Objectives -->
+    <div class="objectives">
+      <h3>🎯 Learning Objectives</h3>
+      <ul>
+                <li>Size a typeahead suggestion service at Google scale: ~4M QPS peak from the 5× keypress multiplier</li>
+                <li>Explain why a trie with top-K cached at each node outperforms Elasticsearch or SQL LIKE for prefix matching</li>
+                <li>Design the offline Kafka → Flink → Trie Builder pipeline that refreshes suggestions every 15 minutes</li>
+                <li>Articulate the personalization blend (90% global + 10% personal) and the CDN caching strategy for short prefixes</li>
+              </ul>
+    </div>
+
+    <div class="content-divider"></div>
+
+    <!-- Lesson Body -->
+    <article class="lesson-body">
+      <h2>Requirements &amp; High-Level Design</h2>
+
+      <h3>1. Clarifying Questions</h3>
+      <p>Interviewers reward candidates who scope before designing. Spend 2–3 minutes here.</p>
+      <table>
+        <thead><tr><th>Question</th><th>Why It Matters</th><th>Typical Answer</th></tr></thead>
+        <tbody>
+          <tr><td>Is this Google Search typeahead or a generic product search box?</td><td>Google Search = global web queries; product search = catalog lookup. Different datasets, ranking signals, and latency targets.</td><td>Assume Google Search scale.</td></tr>
+          <tr><td>What is the max latency budget per keypress?</td><td>Drives whether you cache in Redis vs serve from disk. 100ms total (network + compute) is the Google bar.</td><td>&lt; 100ms p99, ideally &lt; 50ms</td></tr>
+          <tr><td>Do we need personalization (user's own query history blended in)?</td><td>Personalization requires per-user models. Adds complexity but significantly improves relevance.</td><td>Yes, lightweight blend of global + personal</td></tr>
+          <tr><td>Multi-language support?</td><td>Separate trie per language or Unicode-aware single trie. Affects memory layout and routing.</td><td>Top 10 languages; separate tries</td></tr>
+          <tr><td>Real-time trending or batch-updated suggestions?</td><td>Real-time requires streaming aggregation (Flink/Spark Streaming). Batch is simpler but lags by hours.</td><td>Near-real-time, updated every 15 minutes</td></tr>
+          <tr><td>Safe content filtering (profanity, NSFW)?</td><td>Blocklist filter layer before returning suggestions.</td><td>Yes, required before serving</td></tr>
+        </tbody>
+      </table>
+
+      <h3>2. Functional Requirements</h3>
+      <ul>
+        <li><strong>Suggestion API:</strong> Given a prefix string, return top-5 search suggestions ranked by global popularity + personal relevance.</li>
+        <li><strong>Fast response:</strong> Every keypress triggers a request; response must arrive before the next keypress (~150ms human typing cadence).</li>
+        <li><strong>Near-real-time updates:</strong> Trending queries (e.g., breaking news) surface within 15 minutes of becoming popular.</li>
+        <li><strong>Personalization:</strong> A user who frequently searches "machine learning" sees ML-related suggestions boosted for prefixes like "ma".</li>
+        <li><strong>Content filtering:</strong> No profanity, hate speech, or NSFW suggestions returned.</li>
+        <li><strong>Analytics:</strong> Log every query completion for offline trie rebuilds and A/B testing.</li>
+      </ul>
+
+      <h3>3. Non-Functional Requirements</h3>
+      <table>
+        <thead><tr><th>Property</th><th>Target</th><th>Rationale</th></tr></thead>
+        <tbody>
+          <tr><td>Latency</td><td>&lt; 100ms p99 end-to-end</td><td>Human typing rhythm is ~150ms/keystroke; suggestion must arrive before next keypress</td></tr>
+          <tr><td>Availability</td><td>99.99% (52 min/year downtime)</td><td>Missing suggestions degrades search experience; Google runs dual-datacenter hot standby</td></tr>
+          <tr><td>Throughput</td><td>~5M suggestion requests/sec peak</td><td>8.5B queries/day × 5 keypresses ÷ 86,400s × 8× peak factor</td></tr>
+          <tr><td>Consistency</td><td>Eventual (15-min lag OK)</td><td>Stale suggestions are acceptable; users won't notice if "ukraine news" takes 10 min to trend</td></tr>
+          <tr><td>Trie update frequency</td><td>Every 15 minutes</td><td>Balances freshness with rebuild cost; breaking news surfaces quickly enough</td></tr>
+          <tr><td>Read:Write ratio</td><td>~10,000:1</td><td>Reads = every keypress on every search box; writes = once per completed query to update counts</td></tr>
+        </tbody>
+      </table>
+
+      <h3>4. Back-of-Envelope Estimations</h3>
+
+      <h4>4.1 QPS Sizing</h4>
+      <table>
+        <thead><tr><th>Metric</th><th>Calculation</th><th>Result</th></tr></thead>
+        <tbody>
+          <tr><td>Daily queries (Google)</td><td>Published figure</td><td>8.5B queries/day</td></tr>
+          <tr><td>Average keypresses per query</td><td>~5 chars typed before user clicks suggestion</td><td>5 keypresses/query</td></tr>
+          <tr><td>Total suggestion requests/day</td><td>8.5B × 5</td><td>42.5B requests/day</td></tr>
+          <tr><td>Average QPS</td><td>42.5B ÷ 86,400s</td><td>~492K QPS</td></tr>
+          <tr><td>Peak QPS (8× multiplier)</td><td>492K × 8</td><td>~3.9M QPS</td></tr>
+          <tr><td>Write QPS (query completions)</td><td>8.5B ÷ 86,400</td><td>~98K writes/sec</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout callout-insight">
+        <strong>💡 The Keypress Multiplier:</strong> The most common mistake is sizing for 98K QPS (raw queries). The actual load is 5× that because <em>every keypress triggers a suggestion request</em>. At peak, the suggestion service handles nearly 4M requests/sec — this is why Google pre-computes and caches suggestions in Redis rather than querying a database per keystroke.
+      </div>
+
+      <h4>4.2 Data Size</h4>
+      <table>
+        <thead><tr><th>Data Point</th><th>Calculation</th><th>Result</th></tr></thead>
+        <tbody>
+          <tr><td>Unique popular queries in trie</td><td>Top 1B queries cover &gt;99% of traffic (Zipf's law)</td><td>1B queries</td></tr>
+          <tr><td>Avg query length</td><td>~20 chars including spaces</td><td>20 bytes</td></tr>
+          <tr><td>Trie storage (raw)</td><td>1B queries × 20 bytes</td><td>20 GB</td></tr>
+          <tr><td>Top-5 suggestions per prefix node</td><td>Top 5 strings × 50 bytes avg × number of nodes</td><td>~100 GB with suggestions cached at nodes</td></tr>
+          <tr><td>Redis trie cache (per shard)</td><td>100 GB ÷ 10 shards</td><td>10 GB/shard — fits in a single Redis node</td></tr>
+          <tr><td>Query log storage (Kafka)</td><td>98K writes/sec × 50 bytes × 86,400s × 7 days</td><td>~3 TB/week — manageable in Kafka with 7-day retention</td></tr>
+        </tbody>
+      </table>
+
+      <h3>5. High-Level Architecture</h3>
+      <pre><code>
+┌─────────────────────────────────────────────────────────────────────┐
+│                         CLIENT (Browser / App)                      │
+│  User types "wea" → debounced 50ms → GET /suggest?q=wea&lang=en    │
+└──────────────────────┬──────────────────────────────────────────────┘
+                       │ HTTPS
+┌──────────────────────▼──────────────────────────────────────────────┐
+│                        API Gateway / CDN Edge                        │
+│  • Rate limiting (10 req/s per user)                                 │
+│  • Language detection from Accept-Language header                    │
+│  • Route to nearest datacenter                                       │
+└──────────────────────┬──────────────────────────────────────────────┘
+                       │
+         ┌─────────────▼──────────────┐
+         │    Suggestion Service       │  (Stateless, 100s of nodes)
+         │  • Profanity filter         │
+         │  • Personalization blend    │
+         │  • Redis trie lookup        │
+         └──────┬──────────┬──────────┘
+                │          │
+    ┌───────────▼──┐  ┌────▼──────────────┐
+    │  Redis Trie  │  │  Personal History  │
+    │  Cache Shards│  │  Service (Redis    │
+    │  (per lang)  │  │  per-user store)  │
+    └──────────────┘  └───────────────────┘
+
+                OFFLINE PIPELINE (updates trie every 15 min)
+
+┌──────────────┐    ┌──────────┐    ┌─────────────┐    ┌──────────────┐
+│  Query Log   │───▶│  Kafka   │───▶│    Flink    │───▶│ Trie Builder │
+│  Collector   │    │(7-day    │    │(7-day count │    │ (ranks top-5 │
+│              │    │retention)│    │ aggregation)│    │  per prefix) │
+└──────────────┘    └──────────┘    └─────────────┘    └──────┬───────┘
+                                                               │
+                                              ┌────────────────▼──────────────────┐
+                                              │    Redis Trie Shards (hot-swap)   │
+                                              │  prefix → JSON[top5 suggestions]  │
+                                              └───────────────────────────────────┘
+      </code></pre>
+
+      <h3>6. Core Components</h3>
+      <table>
+        <thead><tr><th>Component</th><th>Role</th><th>Technology</th></tr></thead>
+        <tbody>
+          <tr><td>Suggestion Service</td><td>Stateless prefix lookup, profanity filter, personalization blend, response assembly</td><td>Go / Java, horizontally scaled</td></tr>
+          <tr><td>Redis Trie Cache</td><td>Pre-computed top-5 suggestions per prefix stored as hash: prefix → JSON. O(1) lookup per keypress.</td><td>Redis Cluster (10 shards × 10 GB = 100 GB total)</td></tr>
+          <tr><td>Query Log Collector</td><td>Async Kafka producer; logs every completed query (prefix + selected suggestion + user_id)</td><td>Kafka, 2,000 partitions, 7-day retention</td></tr>
+          <tr><td>Flink Aggregation</td><td>7-day sliding window, 15-min hop; emits (query_text → count) ranked by frequency</td><td>Apache Flink, Count-Min Sketch for count estimation</td></tr>
+          <tr><td>Trie Builder</td><td>Reads Flink output, builds in-memory trie, stores top-5 at every prefix node, serializes to Redis</td><td>Java service, atomic hot-swap via Redis RENAME</td></tr>
+          <tr><td>Personal History Service</td><td>Per-user sorted set of recent queries; blended at serve time (90% global + 10% personal)</td><td>Redis (TTL 90 days), per-user ZADD</td></tr>
+          <tr><td>Profanity Filter</td><td>Blocklist of disallowed terms; applied before returning suggestions</td><td>In-memory Aho-Corasick automaton</td></tr>
+        </tbody>
+      </table>
+
+      <h3>7. API Design</h3>
+      <table>
+        <thead><tr><th>Endpoint</th><th>Method</th><th>Params</th><th>Response</th></tr></thead>
+        <tbody>
+          <tr><td><code>/v1/suggest</code></td><td>GET</td><td><code>q=wea&amp;lang=en&amp;limit=5&amp;uid=u123</code></td><td><code>{ "suggestions": ["weather", "wearable tech", "weather forecast", "weather today", "wearable devices"] }</code></td></tr>
+          <tr><td><code>/v1/query-log</code></td><td>POST (async)</td><td><code>{ prefix, selected, uid, session_id }</code></td><td><code>{ "logged": true }</code></td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout callout-warning">
+        <strong>⚠️ GET vs POST for Suggest:</strong> Use GET — it's cacheable at the CDN/reverse proxy layer. A CDN can serve <code>GET /suggest?q=the</code> from edge cache, eliminating origin load for the most popular prefixes. POST requests are not cached. Short prefixes (1–3 chars) can have cache TTL of 5 minutes; longer prefixes are too numerous to cache effectively.
+      </div>
+
+      <h3>8. Why Trie Over Elasticsearch / SQL LIKE?</h3>
+      <table>
+        <thead><tr><th>Approach</th><th>Prefix Lookup Complexity</th><th>Problem</th></tr></thead>
+        <tbody>
+          <tr><td>SQL <code>LIKE 'wea%'</code></td><td>O(N) full table scan without index; O(log N) with B-tree prefix index</td><td>B-tree prefix index works but can't cache top-K at node level; requires post-sort</td></tr>
+          <tr><td>Elasticsearch</td><td>O(L × log N) via inverted index + prefix query</td><td>Overkill for pure prefix matching; 100ms+ for cold queries at 4M QPS</td></tr>
+          <tr><td>Hash map prefix → results</td><td>O(1) lookup</td><td>Stores every possible prefix; memory proportional to total prefix space (too large)</td></tr>
+          <tr><td><strong>Trie + top-K at each node</strong></td><td><strong>O(L) traversal, then O(1) — return pre-cached top-5</strong></td><td><strong>None — optimal for this use case</strong></td></tr>
+        </tbody>
+      </table>
+
+      <p>The key insight: by pre-computing and caching the top-5 suggestions at <em>every node</em> in the trie, a prefix lookup becomes a single trie traversal (O(L) where L = prefix length) with no further computation. After the traversal, the answer is already there — no ranking, no scanning leaves.</p>
+
+      <h3>Key Takeaways</h3>
+      <ul>
+        <li><strong>5× keypress multiplier:</strong> Size the suggestion service at 5× the query QPS — every keypress is a request. At Google scale this is ~4M QPS peak.</li>
+        <li><strong>Read:write = 10,000:1:</strong> Optimize entirely for reads; write path (trie update) is offline and asynchronous.</li>
+        <li><strong>Trie with top-K at each node:</strong> Pre-computation turns O(N log K) ranking at query time into O(L) traversal + O(1) return.</li>
+        <li><strong>Redis trie cache:</strong> 100 GB fits in 10 Redis shards at 10 GB each; O(1) lookup per keypress via hash GET.</li>
+        <li><strong>Offline pipeline freshness:</strong> 15-minute rebuild cycle with Flink 7-day sliding window balances trending freshness vs rebuild cost.</li>
+        <li><strong>Personalization blend:</strong> 90% global frequency + 10% personal history avoids cold-start while surfacing user preferences.</li>
+      </ul>
+
+      <h3>Interview Tips</h3>
+      <ul>
+        <li><strong>Anchor on latency first:</strong> The &lt;100ms constraint drives every storage decision — it's why you use Redis, not Elasticsearch.</li>
+        <li><strong>Explain the 5× multiplier unprompted:</strong> Most candidates size for query QPS only. Identifying the keypress multiplier signals you've thought about real production behavior.</li>
+        <li><strong>Trie vs. hash map tradeoff:</strong> A flat hash map of prefix→results works but stores redundant data. A trie shares node prefixes, making memory proportional to the unique prefix space, not total data.</li>
+        <li><strong>Hot-swap trie atomically:</strong> When discussing trie rebuilds, mention Redis RENAME to atomically swap the old trie key with the new one — zero-downtime update.</li>
+        <li><strong>CDN caching for top prefixes:</strong> Short prefixes (1–3 chars) are shared across all users; a CDN edge cache can absorb the top 676 (26×26) two-char prefix queries entirely, eliminating origin load.</li>
+      </ul>
+    </article>
+
+    <!-- Mark Complete -->
+    <div class="complete-bar">
+      <p>Ready to move on? Mark this lesson complete to track your progress.</p>
+      <button class="complete-btn" id="completeBtn" onclick="markComplete()">
+        ✓ Mark as Complete
+      </button>
+    </div>
+
+    <!-- Prev / Next -->
+    <nav class="lesson-nav">
+                  <a class="nav-card prev" href="c22-l3.html">
+        <div class="nav-label">← Previous</div>
+        <div class="nav-title">Deep Dive — CDN &amp; Metadata Management</div>
+        <div class="nav-chapter">Design YouTube / Netflix</div>
+      </a>
+      
+                  <a class="nav-card next" href="c23-l1.html">
+        <div class="nav-label">Next →</div>
+        <div class="nav-title">Deep Dive — Trie Data Structure</div>
+        <div class="nav-chapter">Design Typeahead Suggestion</div>
+      </a>
+          </nav>
+
+  </main>
+</div>
+
+<script>
+function markComplete() {
+  const btn = document.getElementById('completeBtn');
+  btn.textContent = '✓ Completed!';
+  btn.classList.add('done');
+  // In a real app: AJAX call to save progress
+}
+
+// Keyboard navigation
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.key === 'ArrowLeft') window.location = 'lesson.php?c=22&l=3';
+      if (e.key === 'ArrowRight') window.location = 'lesson.php?c=23&l=1';
+  });
+</script>
+</body>
+</html>
