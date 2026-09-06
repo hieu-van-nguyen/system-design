@@ -513,7 +513,100 @@ body {
 
     <!-- Lesson Body -->
     <article class="lesson-body">
-      <h2>Requirements &amp;amp; Estimations</h2><p>This lesson covers the key concepts, tradeoffs, and interview patterns for <strong>Requirements &amp;amp; Estimations</strong>.</p><blockquote>Content for this lesson is being prepared. Check back soon!</blockquote><h2>Key Takeaways</h2><ul><li>Always clarify requirements before designing</li><li>Consider scale, availability, and consistency tradeoffs</li><li>Justify your technology choices with concrete reasoning</li><li>Know when to use SQL vs NoSQL, cache vs no cache</li></ul><h2>Interview Tips</h2><ul><li>Draw the architecture diagram first, then explain components</li><li>Think out loud — interviewers value your reasoning process</li><li>Acknowledge what you don&#039;t know and explain how you&#039;d find out</li><li>Ask clarifying questions: read vs write heavy? consistency requirements?</li></ul>    </article>
+      <h2>Requirements &amp; Estimations</h2>
+      <p>Uber's backend matches riders requesting a trip with nearby available drivers, in real time, while both sides are constantly moving. Unlike Chapter 28's static-place search, the defining constraint here isn't read volume — it's that <strong>every active driver is continuously writing its location</strong>, and the system must match, price, and dispatch within seconds.</p>
+
+      <h3>1. Clarifying Questions</h3>
+      <table>
+        <thead><tr><th>Question</th><th>Why it matters</th></tr></thead>
+        <tbody>
+          <tr><td>Ride-hailing only, or also deliveries (Uber Eats)?</td><td>Scope to ride-hailing; deliveries share the dispatch pattern but add a different matching unit (orders, not passengers)</td></tr>
+          <tr><td>How often does a driver's app report its location?</td><td>Directly sets the location-write rate — the dominant load on the system (computed below)</td></tr>
+          <tr><td>Do we need the globally-optimal driver match, or a "good enough, fast" match?</td><td>Optimal matching (e.g., minimizing total wait time across all riders) doesn't scale to sub-second dispatch; assume nearest-available with a few candidates considered</td></tr>
+          <tr><td>Must the system prevent a driver from being double-booked?</td><td>Strong consistency requirement on the "accept ride" step, even though location updates are eventually consistent (detailed in Lesson 3)</td></tr>
+          <tr><td>Is dynamic (surge) pricing in scope?</td><td>Adds a real-time demand/supply pipeline (Lesson 4); assume yes</td></tr>
+        </tbody>
+      </table>
+      <p>For this design: ride-hailing only, drivers report location every ~4 seconds, matching is "nearest available, fast" rather than globally optimal, ride acceptance must be strongly consistent (no double-booking), and surge pricing is in scope.</p>
+
+      <h3>2. Functional Requirements</h3>
+      <ul>
+        <li>Riders can request a ride given a pickup and drop-off location and see an ETA/fare estimate</li>
+        <li>The system matches a ride request to a nearby available driver and dispatches an offer</li>
+        <li>Drivers continuously report their location while online/on-trip</li>
+        <li>Riders can track their assigned driver's location in real time during pickup and the trip</li>
+        <li>Fares reflect real-time supply/demand (surge multiplier) at request time</li>
+        <li>Both parties can cancel; the system re-matches or refunds appropriately</li>
+      </ul>
+
+      <h3>3. Non-Functional Requirements</h3>
+      <table>
+        <thead><tr><th>Attribute</th><th>Target</th></tr></thead>
+        <tbody>
+          <tr><td>Latency</td><td>Match + dispatch within a few seconds of a ride request; location updates visible within ~1-2s</td></tr>
+          <tr><td>Consistency</td><td>Strong consistency for ride acceptance (exactly one driver per ride); eventual consistency for location data</td></tr>
+          <tr><td>Availability</td><td>Favor availability for location ingestion — dropping a stale ping is fine, refusing to accept pings is not</td></tr>
+          <tr><td>Scalability</td><td>Sustain continuous location writes from millions of drivers plus bursty, geographically-concentrated ride-request spikes (surge events)</td></tr>
+          <tr><td>Durability</td><td>Trip records (fare, route, timestamps) must be durable for billing/receipts; raw location pings do not need long-term durability</td></tr>
+        </tbody>
+      </table>
+      <blockquote>💡 <strong>Interview signal:</strong> Call out that consistency requirements differ <em>within the same system</em> — strongly consistent ride acceptance, eventually consistent location. Treating the whole system as one consistency level is a common shortcut that misses the double-booking requirement.</blockquote>
+
+      <h3>4. Traffic Estimation</h3>
+      <pre><code>Assumptions:
+  Active drivers (online at once) = 1,000,000  (1M)
+  Rider DAU                       = 100,000,000  (100M)
+  Rides/day                       = 10,000,000  (10M)
+  Driver location ping interval   = every 4 seconds while online
+
+Ride requests/sec = 10M / 86,400              ≈ 116 rides/sec (avg)
+Ride requests peak ≈ 116 * 3 (commute/event surge) ≈ 350 rides/sec (peak)
+
+Driver location writes/sec = 1,000,000 drivers / 4 sec  = 250,000 writes/sec
+  // This dwarfs ride-request traffic by ~700-2,000×. The system's write
+  // path is dominated by location ingestion, not by ride requests — this
+  // is the number that shapes the ingest architecture in Lesson 2.</code></pre>
+
+      <h3>5. Storage Estimation</h3>
+      <pre><code>Trip record (rider_id, driver_id, pickup, dropoff, fare, surge_multiplier,
+             timestamps, route summary): ~1 KB/trip
+  10M rides/day * 1 KB                 = 10 GB/day
+  Over 5 years: 10 GB * 365 * 5         ≈ 18 TB (durable, for billing/receipts/disputes)
+
+Driver location pings: NOT stored durably per-ping — only the latest
+position per driver is kept (in the geospatial index from Ch.28's
+geohash + Redis approach), overwritten every ~4 seconds.
+  Live location footprint: 1M drivers * ~50 bytes (id + lat/lng + ts) ≈ 50 MB
+  // Tiny and entirely in-memory — confirms location state is a cache,
+  // not a database table, reinforcing the eventual-consistency NFR above.</code></pre>
+      <blockquote>💡 <strong>Interview signal:</strong> Explicitly stating that raw pings are <em>not</em> durably stored (only trip summaries are) heads off a common interviewer trap: "so you're writing 250K location records/sec to your database?" — the answer is no, and explaining why shows real design judgment.</blockquote>
+
+      <h3>6. Interfaces (Internal)</h3>
+      <table>
+        <thead><tr><th>API</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td><code>requestRide(riderId, pickup, dropoff) → rideId, estimatedFare</code></td><td>Kicks off matching (Lesson 3); fare includes current surge multiplier (Lesson 4)</td></tr>
+          <tr><td><code>updateDriverLocation(driverId, lat, lng)</code></td><td>High-frequency write (~250K/sec system-wide) into the live location index</td></tr>
+          <tr><td><code>getNearbyDrivers(lat, lng, radius) → driverIds[]</code></td><td>Reuses the geospatial index pattern from Chapter 28, adapted for moving entities</td></tr>
+          <tr><td><code>acceptRide(driverId, rideId)</code></td><td>Strongly consistent — must guarantee exactly one driver is assigned (Lesson 3)</td></tr>
+        </tbody>
+      </table>
+
+      <h2>Key Takeaways</h2>
+      <ul>
+        <li>Driver location writes (~250K/sec) dominate the system's load by three orders of magnitude over ride requests (~116-350/sec) — design the ingest path first</li>
+        <li>Consistency requirements are not uniform: ride acceptance must be strongly consistent (no double-booking), location data is eventually consistent</li>
+        <li>Raw location pings are ephemeral, in-memory, and overwritten — only trip summaries need durable, long-term storage</li>
+        <li>This system reuses the geospatial indexing idea from location-based search, but for moving entities rather than static places</li>
+      </ul>
+      <h2>Interview Tips</h2>
+      <ul>
+        <li>Lead with the location-write rate, not the ride-request rate — it's the number that dominates the architecture</li>
+        <li>Explicitly split consistency requirements by data type (booking vs. location) rather than picking one model for the whole system</li>
+        <li>State that raw pings aren't durably persisted before an interviewer asks — it preempts a common storage-sizing trap</li>
+        <li>If you covered Chapter 28, reference it directly: "same nearby-search problem, but now the points move" reframes it as a known pattern, not a new one</li>
+      </ul>
+    </article>
 
     <!-- Mark Complete -->
     <div class="complete-bar">

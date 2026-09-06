@@ -489,7 +489,7 @@ body {
         <div class="lesson-meta-item">
           <span class="lesson-type-badge badge-lesson">lesson</span>
         </div>
-        <div class="lesson-meta-item">⏱ 10 min</div>
+        <div class="lesson-meta-item">⏱ 15 min</div>
         <div class="lesson-meta-item">📖 Chapter 28, Lesson 3</div>
       </div>
     </div>
@@ -498,9 +498,10 @@ body {
     <div class="objectives">
       <h3>🎯 Learning Objectives</h3>
       <ul>
-                <li>Understand the core concepts of: Deep Dive — Ranking, Sharding &amp; Replication</li>
-                <li>Identify key tradeoffs and design decisions</li>
-                <li>Apply this knowledge in a system design interview</li>
+                <li>Design a post-retrieval ranking pass blending distance, rating, and relevance</li>
+                <li>Shard a spatial index by geographic region and reason about hot-region replication</li>
+                <li>Explain periodic rebuild-and-swap as a safe update strategy for a low-write index</li>
+                <li>Contrast static-place indexing (QuadTree) with moving-entity indexing (geohash + Redis)</li>
               </ul>
     </div>
 
@@ -508,7 +509,75 @@ body {
 
     <!-- Lesson Body -->
     <article class="lesson-body">
-      <h2>Deep Dive — Ranking, Sharding &amp;amp; Replication</h2><p>This lesson covers the key concepts, tradeoffs, and interview patterns for <strong>Deep Dive — Ranking, Sharding &amp;amp; Replication</strong>.</p><blockquote>Content for this lesson is being prepared. Check back soon!</blockquote><h2>Key Takeaways</h2><ul><li>Always clarify requirements before designing</li><li>Consider scale, availability, and consistency tradeoffs</li><li>Justify your technology choices with concrete reasoning</li><li>Know when to use SQL vs NoSQL, cache vs no cache</li></ul><h2>Interview Tips</h2><ul><li>Draw the architecture diagram first, then explain components</li><li>Think out loud — interviewers value your reasoning process</li><li>Acknowledge what you don&#039;t know and explain how you&#039;d find out</li><li>Ask clarifying questions: read vs write heavy? consistency requirements?</li></ul>    </article>
+      <h2>Deep Dive — Ranking, Sharding &amp; Replication</h2>
+      <p>The QuadTree from Lesson 2 answers "what's nearby" for a single host. This lesson covers what happens once ~90K searches/sec (Lesson 1) hit real traffic patterns — dense cities generating disproportionate load — plus how retrieved candidates get ranked, and closes with why a moving-entity variant (Nearby Friends) needs a different index entirely.</p>
+
+      <h3>1. Ranking: Blending Distance and Rating</h3>
+      <p>The QuadTree returns candidates ordered only by spatial proximity to the query's bounding boxes — it doesn't know about rating, popularity, or relevance. A ranking pass runs after retrieval:</p>
+      <pre><code>score(place, query) = w1 * distance_score(place, query)
+                     + w2 * rating_score(place)
+                     + w3 * relevance_score(place, query.filters)
+
+  distance_score  = 1 / (1 + distance_km)      // closer is better, smooth decay
+  rating_score    = place.rating / 5.0          // normalized 0-1
+  relevance_score = keyword/category match strength
+
+// Weights (w1, w2, w3) are tunable — a search for "best sushi nearby"
+// might weight rating higher; "sushi near me right now" weights distance higher.</code></pre>
+      <blockquote>💡 <strong>Interview signal:</strong> Explicitly separate "retrieval" (QuadTree — is this place even a candidate?) from "ranking" (score and order the candidates) — collapsing them into one step is a common design smell interviewers watch for.</blockquote>
+
+      <h3>2. Sharding the Index</h3>
+      <p>Recall from Lesson 1: the full index is only ~5GB — small enough to fit on a single host. So why shard at all? Because query <em>load</em>, not index <em>size</em>, is the bottleneck — a handful of dense cities generate a disproportionate share of the ~90K searches/sec peak.</p>
+      <table>
+        <thead><tr><th>Sharding strategy</th><th>Tradeoff</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Shard by region (geographic partitioning)</strong></td><td>Each shard owns a contiguous geographic area (aligned to QuadTree subtrees); a query maps directly to 1-2 shards. Risk: hot regions (NYC, SF) overload their shard while rural shards sit idle</td></tr>
+          <tr><td><strong>Shard by place ID hash</strong></td><td>Even load distribution regardless of geography, but a single spatial query must fan out to <em>every</em> shard and merge results — defeats the purpose of a spatial index</td></tr>
+          <tr><td><strong>Region-based + hot-shard replication</strong></td><td>Shard by region (keeps queries single-shard), but give disproportionately busy regions extra read replicas rather than resharding the whole index</td></tr>
+        </tbody>
+      </table>
+      <p>We shard by region and add extra replicas for hot cities — it keeps the "one query, one shard" property while absorbing uneven load through replication instead of a load-oblivious hash.</p>
+      <blockquote>💡 <strong>Interview signal:</strong> This is the same insight as Lesson 1's storage estimate applied to a new axis — small index size means sharding is about *load*, not *capacity*. Say that connection out loud; it shows you're reasoning from your own earlier numbers, not pattern-matching "shard everything by hash."</blockquote>
+
+      <h3>3. Replication &amp; Rebuild</h3>
+      <pre><code>Because place data changes rarely (Lesson 1: writes are a tiny fraction of reads):
+  - Build the QuadTree offline/periodically (e.g., every few hours) from the
+    place database, incorporating adds/updates since the last build
+  - Push the new tree to all replicas of each region shard (immutable swap,
+    not in-place mutation — avoids partial-update races during a rebuild)
+  - Reads always hit a fully-built, consistent (if slightly stale) tree
+
+Failover: each region shard has N replicas (N scaled up for hot regions);
+a replica failure routes to a sibling replica, never to a cross-region shard.</code></pre>
+
+      <h3>4. Contrast: Why Nearby Friends Needs a Different Index</h3>
+      <p>So far everything assumes <strong>static</strong> places. Nearby Friends (or Uber's nearby-driver search) has the same "find things within a radius" shape, but entities move continuously:</p>
+      <table>
+        <thead><tr><th>Static places (this chapter)</th><th>Moving entities (Nearby Friends / Uber)</th></tr></thead>
+        <tbody>
+          <tr><td>Rebuild the QuadTree every few hours — acceptable staleness</td><td>Positions change every few seconds; a periodically-rebuilt QuadTree would be stale before it finishes building</td></tr>
+          <tr><td>Writes are rare relative to reads (~thousands/day)</td><td>Writes (location pings) can rival or exceed read volume — every moving entity writes its position continuously</td></tr>
+          <tr><td>Index structure: QuadTree (optimized for infrequent rebuild, fast range read)</td><td>Index structure: geohash cells stored in a fast KV store (e.g., Redis) with a short TTL per entry — cheap to overwrite constantly</td></tr>
+          <tr><td>Updates propagate via index rebuild + replica push</td><td>Updates propagate via pub/sub — subscribers watching a geohash cell get pushed new positions in real time</td></tr>
+        </tbody>
+      </table>
+      <p>In short: a QuadTree's strength (an expensive-to-build, cheap-to-query structure) becomes a liability once writes are continuous. Geohash-in-Redis trades some of the QuadTree's density-adaptive precision for O(1) overwrite cost and native TTL expiry — the right trade when positions are stale within seconds.</p>
+
+      <h2>Key Takeaways</h2>
+      <ul>
+        <li>Retrieval (spatial candidates) and ranking (score by distance + rating + relevance) are separate stages — don't conflate them</li>
+        <li>Shard by geographic region to keep queries single-shard, and absorb uneven load with extra replicas for hot cities rather than a load-oblivious hash</li>
+        <li>Because the index is small (~5GB) and writes are rare, periodic full rebuilds pushed to replicas are simpler and safer than in-place mutation</li>
+        <li>Moving entities (Nearby Friends/Uber) break the QuadTree's core assumption of infrequent writes — geohash + Redis (TTL + pub/sub) replaces it for that use case</li>
+      </ul>
+      <h2>Interview Tips</h2>
+      <ul>
+        <li>Separate "why shard" (load, not size) from "how to shard" (region-based) — interviewers often ask "but didn't you say the index fits in memory?" as a trap</li>
+        <li>Justify hot-city replicas over resharding — resharding a QuadTree mid-flight is disruptive; adding replicas to an existing shard isn't</li>
+        <li>If asked about Uber/Nearby Friends, immediately name the write-rate difference as the reason the design changes, rather than re-explaining QuadTrees</li>
+        <li>Mention immutable tree-swap on rebuild — it's a quick, concrete answer to "how do you avoid serving a half-built index?"</li>
+      </ul>
+    </article>
 
     <!-- Mark Complete -->
     <div class="complete-bar">

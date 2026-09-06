@@ -484,7 +484,7 @@ body {
         <div class="lesson-meta-item">
           <span class="lesson-type-badge badge-lesson">lesson</span>
         </div>
-        <div class="lesson-meta-item">⏱ 14 min</div>
+        <div class="lesson-meta-item">⏱ 20 min</div>
         <div class="lesson-meta-item">📖 Chapter 31, Lesson 1</div>
       </div>
     </div>
@@ -493,9 +493,10 @@ body {
     <div class="objectives">
       <h3>🎯 Learning Objectives</h3>
       <ul>
-                <li>Understand the core concepts of: Design Google Docs (Collaborative Editing)</li>
-                <li>Identify key tradeoffs and design decisions</li>
-                <li>Apply this knowledge in a system design interview</li>
+                <li>Explain why concurrent edits diverge without a merge strategy, and how Operational Transformation resolves it</li>
+                <li>Compare OT (centralized, server-authoritative) vs. CRDTs (decentralized) and justify why Docs-style editors use OT</li>
+                <li>Design the op log + periodic snapshot storage model, and get version history "for free" from it</li>
+                <li>Shard documents by docId and separate durable ops from ephemeral presence/cursor data</li>
               </ul>
     </div>
 
@@ -503,7 +504,112 @@ body {
 
     <!-- Lesson Body -->
     <article class="lesson-body">
-      <h2>Design Google Docs (Collaborative Editing)</h2><p>This lesson covers the key concepts, tradeoffs, and interview patterns for <strong>Design Google Docs (Collaborative Editing)</strong>.</p><blockquote>Content for this lesson is being prepared. Check back soon!</blockquote><h2>Key Takeaways</h2><ul><li>Always clarify requirements before designing</li><li>Consider scale, availability, and consistency tradeoffs</li><li>Justify your technology choices with concrete reasoning</li><li>Know when to use SQL vs NoSQL, cache vs no cache</li></ul><h2>Interview Tips</h2><ul><li>Draw the architecture diagram first, then explain components</li><li>Think out loud — interviewers value your reasoning process</li><li>Acknowledge what you don&#039;t know and explain how you&#039;d find out</li><li>Ask clarifying questions: read vs write heavy? consistency requirements?</li></ul>    </article>
+      <h2>Design Google Docs (Collaborative Editing)</h2>
+      <p>This is a bonus, standalone design — unlike Chapters 25-30, there's no separate requirements/high-level/deep-dive lesson split. We cover the full problem in one pass: requirements, architecture, and the one deep-dive that actually matters here — how concurrent edits converge to the same document.</p>
+
+      <h3>1. Clarifying Questions &amp; Scope</h3>
+      <table>
+        <tr><th>Question</th><th>Why it matters</th></tr>
+        <tr><td>Real-time character-level sync, or coarser "save and merge"?</td><td>Character-level sync forces a conflict-resolution algorithm; coarse merge could get away with last-write-wins</td></tr>
+        <tr><td>Do we need offline editing?</td><td>Offline-first pushes toward CRDTs; always-online pushes toward a simpler centralized OT server</td></tr>
+        <tr><td>Do we need version history / "time travel"?</td><td>Changes the storage model — we'll need an append-only op log, not just current state</td></tr>
+        <tr><td>How many concurrent editors per document, typically?</td><td>2-3 is the common case; some docs (shared wikis) spike to 50+ and stress the broadcast fan-out</td></tr>
+      </table>
+      <p>Scope for this lesson: real-time, character-level collaborative editing (Google Docs' actual behavior), online-first, with version history.</p>
+
+      <h3>2. Functional &amp; Non-Functional Requirements</h3>
+      <table>
+        <tr><th>Type</th><th>Requirement</th></tr>
+        <tr><td>Functional</td><td>Multiple users edit the same document concurrently; every client converges to the identical final content</td></tr>
+        <tr><td>Functional</td><td>See other editors' live cursors and selections</td></tr>
+        <tr><td>Functional</td><td>Browse and restore prior versions of a document</td></tr>
+        <tr><td>Non-functional</td><td>Low latency — a keystroke should appear for other editors in well under 100ms on a good connection</td></tr>
+        <tr><td>Non-functional</td><td>Convergence is a hard correctness requirement — like Chapter 30's zero-double-booking, this is not a tunable tradeoff. Every replica must reach the same state.</td></tr>
+        <tr><td>Non-functional</td><td>Durability — no committed keystroke is ever lost, even across reconnects</td></tr>
+      </table>
+
+      <h3>3. Back-of-the-Envelope Estimation</h3>
+      <pre><code>Assume 500K documents being actively edited at any given moment
+Average 3 concurrent editors per active document, each typing ~3 ops/sec while active
+
+Peak aggregate ops = 500,000 docs * 3 editors * 3 ops/sec
+                   = ~4.5M ops/sec system-wide (fan-in to be sharded across doc servers)
+
+Each op (insert/delete + position + payload) ~100 bytes
+A heavily-edited doc over its lifetime might accumulate millions of ops
+  -> replaying the full op log on every load is too slow
+  -> need periodic snapshots (e.g. every 500 ops) to bound load time</code></pre>
+
+      <h3>4. High-Level Architecture</h3>
+      <pre><code>Client A ---\                                    /--- Op Log (durable, per-doc, append-only)
+             \--- WebSocket ---> Doc Server ------+
+Client B ---/     (bidirectional)  (owns one doc)  \--- Snapshot Store (periodic full-state checkpoints)
+             |
+             +--- Presence/Cursor broadcast (ephemeral, pub/sub — not persisted)
+
+Doc Server assignment: consistent hash on docId, same sharding move as Chapter 29's
+driverId hashing — every client editing document X must land on the same server,
+because that server is the single sequencer for X's operations.</code></pre>
+      <blockquote>💡 <strong>Interview signal:</strong> naming <em>why</em> one document needs one authoritative server — it's not a scaling choice, it's a correctness requirement. Without a single sequencer per doc, you have no consistent order to transform operations against.</blockquote>
+
+      <h3>5. Deep Dive — Why Concurrent Edits Diverge</h3>
+      <p>Two users, both viewing revision N of a document, both type at position 5 at the same instant:</p>
+      <pre><code>Doc at revision N: "helloworld"  (positions 0-9)
+
+User A inserts "X" at position 5  -> intends: "helloXworld"
+User B inserts "Y" at position 5  -> intends: "helloYworld"
+
+If the server applies A's op, then naively applies B's untouched op (still "insert Y at 5"):
+  after A:  "helloXworld"   (revision N+1)
+  after B:  "helloYXworld"  (B's op landed at position 5, shoving X right — WRONG, B meant to insert after X)
+
+Client A's local view differs from what the server produced. Divergence.</code></pre>
+      <p>This is the problem <strong>Operational Transformation (OT)</strong> exists to solve.</p>
+
+      <h3>6. Deep Dive — Operational Transformation vs. CRDTs</h3>
+      <table>
+        <tr><th></th><th>Operational Transformation (OT)</th><th>CRDTs (Conflict-free Replicated Data Types)</th></tr>
+        <tr><td>Topology</td><td>Centralized — one authoritative server per document sequences all ops</td><td>Decentralized — any replica can merge with any other, no central sequencer needed</td></tr>
+        <tr><td>Mechanism</td><td>Transform an incoming op against every op committed since the client's known revision, so its effect is correct against the new state</td><td>Each element carries metadata (unique ID, causal ordering) so merges are commutative and always converge</td></tr>
+        <tr><td>Offline support</td><td>Weak — needs a live connection to the sequencer to resolve ops</td><td>Strong — this is the reason CRDTs exist; peers reconcile whenever they happen to connect</td></tr>
+        <tr><td>Cost</td><td>Transform logic gets genuinely intricate for rich structures (tables, formatting, nested lists)</td><td>Tombstones/metadata for every character ever inserted or deleted — significant memory/storage bloat on long-lived documents</td></tr>
+        <tr><td>Used by</td><td>Google Docs' real-time editing model</td><td>Peer-to-peer / offline-first editors (e.g. some note-taking apps)</td></tr>
+      </table>
+      <p>The corrected server-side flow using OT:</p>
+      <pre><code>client_op arrives with (baseRevision, op)
+
+server:
+  if baseRevision == currentRevision:
+    apply op directly, currentRevision += 1
+  else:
+    # client was behind — transform op against every committed op since baseRevision
+    for committedOp in log[baseRevision:currentRevision]:
+        op = transform(op, committedOp)   // adjusts position/index, not content
+    apply transformed op, currentRevision += 1
+  broadcast transformed op + new revision to all other connected clients</code></pre>
+      <p>Re-running the earlier example: B's op (still tagged baseRevision = N) arrives after A's is committed. The server transforms it against A's committed insert — shifting B's target index from 5 to 6 — before applying. Both clients converge on <code>"helloXYworld"</code>.</p>
+      <blockquote>💡 <strong>Interview signal:</strong> don't just say "use OT" — walk through a concrete divergence scenario and show the transform step fixing it. That's the difference between reciting a buzzword and demonstrating you understand the mechanism.</blockquote>
+
+      <h3>7. Storage: Op Log + Snapshots, and Ephemeral Presence</h3>
+      <p>The durable op log doubles as version history for free — replaying ops between any two revisions reconstructs any past state, so "restore this version" is just a replay-and-checkpoint, not a separate feature. Periodic snapshots (e.g. every 500 ops) bound how much of the log must be replayed when a client opens a document cold.</p>
+      <p>Presence and cursor positions are the opposite of the op log: high-frequency, latency-sensitive, and disposable. They're published over the same pub/sub channel the Doc Server already holds open, never written to durable storage — the same hot/cold split Chapter 29's driver-location pings used (live position in Redis/pub-sub, only trip-level records persisted).</p>
+
+      <h2>Key Takeaways</h2>
+      <ul>
+        <li>Convergence — every client reaching identical content — is a hard correctness requirement, not a tunable tradeoff</li>
+        <li>One document maps to one authoritative sequencer server (consistent hash on docId), because a consistent transform order requires a single source of truth</li>
+        <li>OT transforms incoming operations against everything committed since the client's last known revision; CRDTs sidestep the need for a sequencer entirely at the cost of offline support vs. metadata bloat</li>
+        <li>The append-only op log plus periodic snapshots gives you version history without building a separate system for it</li>
+        <li>Ephemeral state (cursors, presence) never touches durable storage — same pattern as Chapter 29's live location pings</li>
+      </ul>
+      <h2>Interview Tips</h2>
+      <ul>
+        <li>Always demonstrate the divergence problem with a concrete two-user example before naming OT as the fix</li>
+        <li>State plainly that Google Docs uses OT, not CRDTs — CRDTs solve a different problem (offline/P2P), don't conflate them</li>
+        <li>Call out the sharding requirement (one doc, one server) as a correctness constraint, not a scaling afterthought</li>
+        <li>Separate durable state (op log, snapshots) from ephemeral state (presence, cursors) early in the design</li>
+      </ul>
+    </article>
 
     <!-- Mark Complete -->
     <div class="complete-bar">

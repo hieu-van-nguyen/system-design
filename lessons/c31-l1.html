@@ -484,7 +484,7 @@ body {
         <div class="lesson-meta-item">
           <span class="lesson-type-badge badge-lesson">lesson</span>
         </div>
-        <div class="lesson-meta-item">⏱ 14 min</div>
+        <div class="lesson-meta-item">⏱ 20 min</div>
         <div class="lesson-meta-item">📖 Chapter 31, Lesson 2</div>
       </div>
     </div>
@@ -493,9 +493,10 @@ body {
     <div class="objectives">
       <h3>🎯 Learning Objectives</h3>
       <ul>
-                <li>Understand the core concepts of: Design a Distributed Message Queue (Kafka)</li>
-                <li>Identify key tradeoffs and design decisions</li>
-                <li>Apply this knowledge in a system design interview</li>
+                <li>Explain why a partition, not a topic, is the unit of both ordering and parallelism</li>
+                <li>Design producer durability with ISR, acks=all, and min.insync.replicas</li>
+                <li>Reason about consumer groups, offset management, and time/size-based retention that enables replay</li>
+                <li>Distinguish at-most-once, at-least-once, and exactly-once delivery, and how idempotent producers + transactions achieve the last</li>
               </ul>
     </div>
 
@@ -503,7 +504,121 @@ body {
 
     <!-- Lesson Body -->
     <article class="lesson-body">
-      <h2>Design a Distributed Message Queue (Kafka)</h2><p>This lesson covers the key concepts, tradeoffs, and interview patterns for <strong>Design a Distributed Message Queue (Kafka)</strong>.</p><blockquote>Content for this lesson is being prepared. Check back soon!</blockquote><h2>Key Takeaways</h2><ul><li>Always clarify requirements before designing</li><li>Consider scale, availability, and consistency tradeoffs</li><li>Justify your technology choices with concrete reasoning</li><li>Know when to use SQL vs NoSQL, cache vs no cache</li></ul><h2>Interview Tips</h2><ul><li>Draw the architecture diagram first, then explain components</li><li>Think out loud — interviewers value your reasoning process</li><li>Acknowledge what you don&#039;t know and explain how you&#039;d find out</li><li>Ask clarifying questions: read vs write heavy? consistency requirements?</li></ul>    </article>
+      <h2>Design a Distributed Message Queue (Kafka)</h2>
+      <p>Another standalone bonus design — one lesson, full scope. Chapters 29 and 30 already used a message queue as a supporting component (driver location pings and pricing events flowing through Kafka topics). Here we open that black box and design it.</p>
+
+      <h3>1. Clarifying Questions &amp; Scope</h3>
+      <table>
+        <tr><th>Question</th><th>Why it matters</th></tr>
+        <tr><td>Do consumers need to replay old messages, or only ever see new ones?</td><td>Replay requires messages to survive being read — rules out a traditional delete-on-consume queue</td></tr>
+        <tr><td>Is strict ordering required, and at what granularity?</td><td>Global ordering across a whole topic doesn't parallelize; per-key ordering does</td></tr>
+        <tr><td>What delivery guarantee — at-most-once, at-least-once, or exactly-once?</td><td>Each has a real cost: exactly-once needs idempotent producers and transactions, not just "try hard"</td></tr>
+        <tr><td>Single datacenter or multi-region?</td><td>Cross-region replication adds a whole additional consistency conversation — we'll scope to single-region</td></tr>
+      </table>
+      <p>Scope for this lesson: a Kafka-style durable, replayable, partitioned log with per-key ordering and configurable delivery guarantees, single-region.</p>
+
+      <h3>2. Functional &amp; Non-Functional Requirements</h3>
+      <table>
+        <tr><th>Type</th><th>Requirement</th></tr>
+        <tr><td>Functional</td><td>Producers publish messages to named topics; consumers subscribe and read them</td></tr>
+        <tr><td>Functional</td><td>Multiple independent consumer groups can each read the full topic at their own pace</td></tr>
+        <tr><td>Functional</td><td>Consumers can rewind and replay messages from any earlier point (bounded by retention)</td></tr>
+        <tr><td>Non-functional</td><td>High throughput — sustain millions of messages/sec across a cluster</td></tr>
+        <tr><td>Non-functional</td><td>Durability — an acknowledged write survives a broker crash</td></tr>
+        <tr><td>Non-functional</td><td>Ordering guarantee scoped to a key (e.g. all events for one driverId), not the whole topic</td></tr>
+      </table>
+
+      <h3>3. Back-of-the-Envelope Estimation</h3>
+      <pre><code>Target: 10M messages/sec cluster-wide, average message size 1KB
+Retention: 7 days
+
+Raw ingress bandwidth = 10M msg/sec * 1KB = ~10GB/sec write throughput to spread across brokers
+7-day retained volume  = 10GB/sec * 86,400 sec/day * 7 days = ~6 PB before replication
+With replication factor 3 (durability)          = ~18 PB of disk across the cluster
+
+-> single-broker, single-disk designs are out of the question; this is why Kafka
+   partitions a topic and spreads partitions (and their replicas) across many brokers.</code></pre>
+
+      <h3>4. Core Architecture: Topics, Partitions, Brokers</h3>
+      <pre><code>Producer ---> Topic "driver-locations" (logical stream)
+                 |
+                 +-- Partition 0  [msg0][msg1][msg2]...  -> Broker A (leader), Broker B/C (replicas)
+                 +-- Partition 1  [msg0][msg1][msg2]...  -> Broker B (leader), Broker A/C (replicas)
+                 +-- Partition 2  [msg0][msg1][msg2]...  -> Broker C (leader), Broker A/B (replicas)
+
+Consumer Group "pricing-service"     Consumer Group "analytics-pipeline"
+  consumer-1 -> partitions 0,1         consumer-1 -> partition 0
+  consumer-2 -> partition 2            consumer-2 -> partition 1
+                                        consumer-3 -> partition 2
+
+Each partition is an append-only log, written sequentially to disk (cheap, sequential I/O).
+A message key (e.g. driverId) is hashed to pick a partition, so a producer controls
+ordering by choosing its key.</code></pre>
+      <p>Each consumer group tracks its own read position independently — that's what lets the pricing service and the analytics pipeline both read every message in "driver-locations" at their own pace, without contending with each other.</p>
+
+      <h3>5. Deep Dive — Partition Is the Unit of Ordering AND Parallelism</h3>
+      <table>
+        <tr><th>Scope</th><th>Ordering guarantee</th><th>Parallelism</th></tr>
+        <tr><td>Whole topic</td><td>None — messages across partitions can be read in any relative order</td><td>Fully parallel across all partitions</td></tr>
+        <tr><td>Single partition</td><td>Strict — messages are appended and read in the order they were written</td><td>Serialized within that partition — one consumer per partition per group at a time</td></tr>
+      </table>
+      <p>This is the single most important design decision in the whole system: ordering is never a per-topic property in Kafka, only ever per-partition. If an interviewer asks "how do you keep events for the same driver in order while still scaling," the answer is: hash driverId to a partition, so every event for that driver always lands in the same partition, in write order — and different drivers' events parallelize freely across the other partitions.</p>
+      <blockquote>💡 <strong>Interview signal:</strong> a candidate who says "Kafka guarantees ordering" without qualifying "per-partition, keyed by producer's choice" hasn't internalized the core tradeoff. Global ordering and parallelism are in direct tension — the partition is where that tension gets resolved.</blockquote>
+
+      <h3>6. Deep Dive — Producer Durability &amp; Exactly-Once</h3>
+      <table>
+        <tr><th>Setting</th><th>Behavior</th><th>Tradeoff</th></tr>
+        <tr><td><code>acks=0</code></td><td>Producer doesn't wait for any broker acknowledgment</td><td>Lowest latency, messages can be silently lost</td></tr>
+        <tr><td><code>acks=1</code></td><td>Waits for the partition leader to write locally</td><td>Lost if the leader crashes before replicas catch up</td></tr>
+        <tr><td><code>acks=all</code> + <code>min.insync.replicas=2</code></td><td>Waits until the leader and at least one in-sync replica (ISR) confirm the write</td><td>Higher latency, but survives a single broker failure with no data loss</td></tr>
+      </table>
+      <p>The ISR (in-sync replica) set is the list of replicas fully caught up with the leader. <code>acks=all</code> only guarantees durability against members of that set — a replica that has fallen behind and dropped out of the ISR doesn't count, which is exactly why <code>min.insync.replicas</code> is set alongside it: it rejects writes outright if too few replicas are in sync, rather than silently accepting a write that only one broker holds.</p>
+      <p>Delivery semantics, layered on top of the acks setting:</p>
+      <pre><code>At-most-once:  fire and forget, no retry on failure       -> can lose messages
+At-least-once: retry on any ambiguous failure (timeout)    -> can duplicate messages
+Exactly-once:  idempotent producer + transactions          -> no loss, no duplicates
+
+Idempotent producer: each producer gets a unique ID and attaches a monotonic
+sequence number to every message per partition. The broker deduplicates retries
+by (producerId, sequenceNumber) — a retried send with a seen sequence number is
+dropped, not reappended. This is the same idea as Chapter 30 Lesson 2's
+idempotency key on confirmBooking() — dedupe retries at the point of write,
+don't rely on the caller never retrying.
+
+Transactions extend this across multiple partitions/topics: a producer can write
+to several partitions and mark them all committed atomically, so a consumer
+reading in read_committed mode never sees a partial, uncommitted batch.</code></pre>
+
+      <h3>7. Deep Dive — Consumer Groups, Offsets &amp; Retention</h3>
+      <p>Consumers don't "pop" messages off the queue — they read (pull) from a partition at their own offset and advance it themselves. The broker retains messages until the configured retention window (time-based, e.g. 7 days, or size-based, e.g. 1TB per partition) expires, regardless of whether every consumer group has read them. That's the mechanism that makes replay possible: consuming is just moving a bookmark, not deleting the message.</p>
+      <pre><code>Partition 1 log:  [0][1][2][3][4][5][6][7] <- next write goes here
+                            ^
+                   pricing-service group's committed offset = 3
+                   (next read returns message 4; messages 0-7 are all still on disk)
+
+Rewind: set the group's offset back to 0 -> re-reads the entire retained history</code></pre>
+      <p>Within one consumer group, each partition is assigned to exactly one consumer at a time — this bounds a group's read parallelism to the partition count, which is why partition count is chosen up front based on target consumer parallelism, not just producer throughput.</p>
+      <blockquote>💡 <strong>Interview signal:</strong> tie retention and replay together explicitly — "messages aren't deleted on read" is the one-sentence answer to "how would a new consumer backfill from history," and it's the detail that separates a message queue from this kind of durable log.</blockquote>
+
+      <h3>8. Where This Shows Up: Chapters 29 &amp; 30</h3>
+      <p>Chapter 29 Lesson 1's hot/cold path split for driver location pings, and Chapter 29 Lesson 3's streaming pricing pipeline, both assumed a Kafka topic sitting between the write path and the downstream consumers (analytics, surge pricing) without designing it. That's exactly this system: location pings and pricing events are producers writing keyed messages (by driverId or geohash cell), and the analytics/pricing services are independent consumer groups reading the same topic at their own pace.</p>
+
+      <h2>Key Takeaways</h2>
+      <ul>
+        <li>A partition, not a topic, is the unit of both ordering and parallelism — ordering is only ever guaranteed within a partition</li>
+        <li>A message's key determines its partition, which means a producer controls ordering by choosing the key (e.g. driverId)</li>
+        <li><code>acks=all</code> plus <code>min.insync.replicas</code> is what actually protects against data loss on broker failure — weaker ack settings trade durability for latency</li>
+        <li>Exactly-once delivery is idempotent producers (dedupe by producerId + sequence number) plus transactions across partitions — the same dedupe-at-write-time idea as Chapter 30's idempotency key</li>
+        <li>Messages aren't deleted on consume — retention (time or size based) plus per-consumer-group offsets is what makes replay and multiple independent readers possible</li>
+      </ul>
+      <h2>Interview Tips</h2>
+      <ul>
+        <li>Never say "Kafka guarantees ordering" without immediately qualifying "per-partition, by key" — that's the core tradeoff interviewers are listening for</li>
+        <li>Distinguish the three delivery semantics precisely, and name the specific mechanism (idempotent producer, transactions) that gets you to exactly-once</li>
+        <li>Explain retention and offsets together — it's the cleanest way to show you understand why this is a durable log, not a transient queue</li>
+        <li>If the interview already covered a system with an event pipeline (like Chapter 29's driver pings), connect back to it — recognizing where this component already showed up is a strong signal</li>
+      </ul>
+    </article>
 
     <!-- Mark Complete -->
     <div class="complete-bar">

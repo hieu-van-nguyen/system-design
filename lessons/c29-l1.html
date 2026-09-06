@@ -494,7 +494,7 @@ body {
         <div class="lesson-meta-item">
           <span class="lesson-type-badge badge-lesson">lesson</span>
         </div>
-        <div class="lesson-meta-item">⏱ 10 min</div>
+        <div class="lesson-meta-item">⏱ 14 min</div>
         <div class="lesson-meta-item">📖 Chapter 29, Lesson 2</div>
       </div>
     </div>
@@ -503,9 +503,10 @@ body {
     <div class="objectives">
       <h3>🎯 Learning Objectives</h3>
       <ul>
-                <li>Understand the core concepts of: High-Level Design &amp; Driver Location Updates</li>
-                <li>Identify key tradeoffs and design decisions</li>
-                <li>Apply this knowledge in a system design interview</li>
+                <li>Decompose Uber's backend into services (rider, driver, location, matching, pricing, trip)</li>
+                <li>Design the driver-location ingest path for ~250K writes/sec without hitting a database</li>
+                <li>Apply Chapter 28's geohash + Redis pattern to moving entities, including TTL and pub/sub for live tracking</li>
+                <li>Separate the hot live-location path from the cold analytics/history path</li>
               </ul>
     </div>
 
@@ -513,7 +514,80 @@ body {
 
     <!-- Lesson Body -->
     <article class="lesson-body">
-      <h2>High-Level Design &amp;amp; Driver Location Updates</h2><p>This lesson covers the key concepts, tradeoffs, and interview patterns for <strong>High-Level Design &amp;amp; Driver Location Updates</strong>.</p><blockquote>Content for this lesson is being prepared. Check back soon!</blockquote><h2>Key Takeaways</h2><ul><li>Always clarify requirements before designing</li><li>Consider scale, availability, and consistency tradeoffs</li><li>Justify your technology choices with concrete reasoning</li><li>Know when to use SQL vs NoSQL, cache vs no cache</li></ul><h2>Interview Tips</h2><ul><li>Draw the architecture diagram first, then explain components</li><li>Think out loud — interviewers value your reasoning process</li><li>Acknowledge what you don&#039;t know and explain how you&#039;d find out</li><li>Ask clarifying questions: read vs write heavy? consistency requirements?</li></ul>    </article>
+      <h2>High-Level Design &amp; Driver Location Updates</h2>
+      <p>Per Lesson 1's numbers, the system must absorb ~250,000 driver location writes/sec while handling only ~116-350 ride requests/sec. That asymmetry drives every decision below: the location path is optimized purely for high-throughput writes, kept entirely separate from the transactional booking path.</p>
+
+      <h3>1. Service Decomposition</h3>
+      <pre><code>                     ┌─────────────┐
+                     │  API Gateway │
+                     └──────┬──────┘
+            ┌───────────────┼────────────────────┐
+            ▼                ▼                    ▼
+     ┌─────────────┐  ┌──────────────┐     ┌──────────────┐
+     │ Rider Service│  │ Driver Service│     │ Location Svc │◄── 250K writes/sec
+     └──────┬──────┘  └──────┬───────┘     └──────┬───────┘    (driver app pings)
+            │                │                     │
+            └───────┬────────┴──────────┬──────────┘
+                     ▼                   ▼
+             ┌───────────────┐   ┌───────────────┐
+             │ Matching Svc  │   │  Pricing Svc  │
+             │ (Lesson 3)    │   │  (Lesson 4)   │
+             └───────┬───────┘   └───────────────┘
+                     ▼
+             ┌───────────────┐
+             │  Trip Service │──► Trip DB (durable, ~18TB/5yr, Lesson 1)
+             └───────────────┘</code></pre>
+      <p>Rider/Driver services handle profile and app-session concerns. Location Service is the high-write-throughput path. Matching and Pricing are read-heavy consumers of live location + demand signals. Trip Service is the durable system-of-record, written once per ride rather than once per ping.</p>
+
+      <h3>2. Driver Location Ingestion</h3>
+      <table>
+        <thead><tr><th>Option</th><th>Tradeoff</th></tr></thead>
+        <tbody>
+          <tr><td>HTTP request per ping</td><td>Simple, but connection setup overhead (TLS handshake) at 250K/sec is wasteful — most of each request is protocol overhead, not payload</td></tr>
+          <tr><td>Persistent WebSocket per driver</td><td>One long-lived connection per online driver (1M concurrent); pings become tiny frames on an already-open socket — chosen approach</td></tr>
+        </tbody>
+      </table>
+      <p>Each driver's app holds one WebSocket to a Location Service instance (behind a connection-aware load balancer, so reconnects are cheap). A ping is a small frame: <code>{driverId, lat, lng, ts}</code>, roughly 50 bytes. The same channel pushes ride offers and cancellations down to the driver — no separate push-notification path needed while the socket is open.</p>
+      <blockquote>💡 <strong>Interview signal:</strong> Naming the connection-count problem (1M concurrent sockets) and how it's sharded across Location Service instances (consistent hashing on driverId) shows you're thinking about the ingestion tier as infrastructure, not just an API endpoint.</blockquote>
+
+      <h3>3. Storing Live Location: Building on Chapter 28</h3>
+      <p>Chapter 28's Lesson 3 previewed this exact case: geohash the driver's (lat, lng) to ~1km precision, and store it in Redis as <code>GEOADD driver_locations {geohash} {driverId}</code> (Redis's native geo commands are a sorted-set-backed geohash index). Each write:</p>
+      <pre><code>1. Driver ping arrives over WebSocket → Location Service
+2. GEOADD driver_locations lng lat driverId      // O(log N), ~250K/sec aggregate
+3. SET driver:{driverId}:meta {status, lat, lng, ts} EX 15   // TTL — stale if no ping in 15s
+4. PUBLISH driver_updates:{geohash_cell} {driverId, lat, lng} // for riders actively tracking a trip</code></pre>
+      <p>The TTL matters more here than in Chapter 28: a driver who goes offline without explicitly signaling it (app killed, phone dies) must disappear from nearby-driver queries automatically, not linger as a stale, unreachable match candidate. The pub/sub channel per geohash cell is what powers the rider-facing "your driver is 2 minutes away" live map — riders subscribe to the cell(s) their driver is currently in.</p>
+      <blockquote>💡 <strong>Interview signal:</strong> If you covered Chapter 28, say so explicitly: "this is the moving-entity variant of the QuadTree design — same nearby-search problem, but the index must tolerate constant churn, hence Redis geohash + TTL over a tree structure that's expensive to rebalance under high write rates."</blockquote>
+
+      <h3>4. Separating Hot Path from Analytics/History</h3>
+      <p>The Redis geo-index above is a cache of <em>current</em> position only — it is overwritten on every ping and holds no history. Trip receipts, ETA-accuracy analysis, and driver-earnings dashboards need historical location data, but that must not sit on the write-critical path:</p>
+      <pre><code>Location Service ──► Kafka topic "driver_pings" (fire-and-forget, async)
+                                    │
+                                    ▼
+                     Stream consumer batches + compresses
+                                    │
+                                    ▼
+                 Cold storage (S3/HDFS): route polyline per trip, ~2KB/trip
+                                    │
+                                    ▼
+                   Batch jobs: ETA-model training, surge analytics (Lesson 4)</code></pre>
+      <p>Because this path is async and decoupled via Kafka, a slowdown in the analytics pipeline never backs up into the live ping-ingest path — the two have independent failure domains, which matches the availability-over-consistency NFR from Lesson 1.</p>
+
+      <h2>Key Takeaways</h2>
+      <ul>
+        <li>Service boundaries follow the load profile: Location Service is a write-optimized tier, entirely separate from the transactional Trip Service</li>
+        <li>Persistent WebSocket connections amortize protocol overhead across 250K/sec of tiny location pings</li>
+        <li>Chapter 28's geohash + Redis pattern extends naturally to moving entities by adding a TTL (staleness) and pub/sub (live tracking) on top</li>
+        <li>Live location (Redis, overwritten) and location history (Kafka → cold storage, appended) are two different systems serving two different consistency/durability needs</li>
+      </ul>
+      <h2>Interview Tips</h2>
+      <ul>
+        <li>Draw the write path (ping → Location Service → Redis) separately from the read path (matching/rider tracking) — conflating them is a common mistake</li>
+        <li>Justify WebSocket over HTTP with the connection-overhead argument, not just "it's faster"</li>
+        <li>Explicitly connect back to prior location-indexing knowledge if you have it — interviewers reward recognizing a known pattern in a new context</li>
+        <li>Call out the TTL/staleness mechanism unprompted — "what if a driver's app crashes?" is a near-guaranteed follow-up</li>
+      </ul>
+    </article>
 
     <!-- Mark Complete -->
     <div class="complete-bar">

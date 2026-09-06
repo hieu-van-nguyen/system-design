@@ -494,7 +494,7 @@ body {
         <div class="lesson-meta-item">
           <span class="lesson-type-badge badge-lesson">lesson</span>
         </div>
-        <div class="lesson-meta-item">⏱ 12 min</div>
+        <div class="lesson-meta-item">⏱ 15 min</div>
         <div class="lesson-meta-item">📖 Chapter 30, Lesson 3</div>
       </div>
     </div>
@@ -503,9 +503,10 @@ body {
     <div class="objectives">
       <h3>🎯 Learning Objectives</h3>
       <ul>
-                <li>Understand the core concepts of: Deep Dive — Concurrency &amp; Distributed Lock</li>
-                <li>Identify key tradeoffs and design decisions</li>
-                <li>Apply this knowledge in a system design interview</li>
+                <li>Compare SELECT FOR UPDATE, optimistic versioning, and a Redis distributed lock for the holdSeat() write</li>
+                <li>Explain why the database transaction — not the Redis lock — must be the source of truth for correctness</li>
+                <li>Handle the race where a hold's TTL expires while payment is already in flight</li>
+                <li>Use an idempotency key so retried payment confirmations can't double-book or double-charge</li>
               </ul>
     </div>
 
@@ -513,7 +514,81 @@ body {
 
     <!-- Lesson Body -->
     <article class="lesson-body">
-      <h2>Deep Dive — Concurrency &amp;amp; Distributed Lock</h2><p>This lesson covers the key concepts, tradeoffs, and interview patterns for <strong>Deep Dive — Concurrency &amp;amp; Distributed Lock</strong>.</p><blockquote>Content for this lesson is being prepared. Check back soon!</blockquote><h2>Key Takeaways</h2><ul><li>Always clarify requirements before designing</li><li>Consider scale, availability, and consistency tradeoffs</li><li>Justify your technology choices with concrete reasoning</li><li>Know when to use SQL vs NoSQL, cache vs no cache</li></ul><h2>Interview Tips</h2><ul><li>Draw the architecture diagram first, then explain components</li><li>Think out loud — interviewers value your reasoning process</li><li>Acknowledge what you don&#039;t know and explain how you&#039;d find out</li><li>Ask clarifying questions: read vs write heavy? consistency requirements?</li></ul>    </article>
+      <h2>Deep Dive — Concurrency &amp; Distributed Lock</h2>
+      <p>Per Lesson 1's numbers, a single popular seat can receive dozens of concurrent <code>holdSeat()</code> calls within the same millisecond during a flash sale. Exactly one must win. This lesson is about where that guarantee actually lives — and it's a different place than most candidates first assume.</p>
+
+      <h3>1. The Contention Problem</h3>
+      <pre><code>t=0ms: User A → holdSeat(seat_42)
+t=0ms: User B → holdSeat(seat_42)   // same seat, same instant
+t=0ms: User C → holdSeat(seat_42)
+
+Exactly one of A/B/C must receive the hold. The other two must be told
+"seat no longer available" — instantly, not after both are shown a
+false success and payment fails later.</code></pre>
+
+      <h3>2. Comparing Concurrency Mechanisms</h3>
+      <table>
+        <thead><tr><th>Mechanism</th><th>Tradeoff</th></tr></thead>
+        <tbody>
+          <tr><td><code>SELECT ... FOR UPDATE</code> (pessimistic row lock in the DB)</td><td>Correct and simple, but holds a DB connection/lock for the round trip — expensive at 500K req/sec against a handful of hot rows; connection pool exhaustion becomes the new bottleneck</td></tr>
+          <tr><td>Optimistic concurrency (version column, <code>UPDATE ... WHERE status='AVAILABLE' AND version=N</code>)</td><td>No held lock, scales better, but under extreme contention most attempts fail the compare-and-swap and must retry — retry storms can still overwhelm the DB</td></tr>
+          <tr><td>Redis distributed lock in front of the DB (<code>SET seat:42 lockOwner NX PX 5000</code>)</td><td>Absorbs the vast majority of losing attempts in memory, before they ever reach the database — chosen as the front-line filter, not the source of truth (see below)</td></tr>
+        </tbody>
+      </table>
+
+      <h3>3. The Correct Split: Redis Manages Contention, the DB Owns Correctness</h3>
+      <p>A common mistake is treating a Redis lock (or a "Redlock"-style multi-node lock) as sufficient proof that a seat was correctly reserved. It isn't: Redis can fail over, a client can pause (GC, network delay) past the lock's expiry, and act as if it still holds the lock. For a business-critical guarantee like "this seat was sold exactly once," that's not acceptable.</p>
+      <pre><code>1. Redis: SET seat:{id}:lock {requestId} NX PX 5000
+     → if this fails, reject immediately (someone else is already
+       attempting this seat) — filters out ~499,999 of 500,000 requests
+       in memory, cheaply, without touching the database
+2. Only the Redis-lock winner proceeds to:
+     DB transaction:
+       UPDATE seats SET status='HELD', held_by=userId, expires_at=NOW()+10min
+       WHERE seat_id={id} AND status='AVAILABLE'
+     → this UPDATE's WHERE clause + a unique constraint on (event_id, seat_id,
+       status='BOOKED') is the actual, durable, transactional guarantee.
+       Redis made this cheap to reach; it did not make it correct.</code></pre>
+      <p>So: the Redis lock is a <strong>traffic filter</strong> that keeps ~99.998% of doomed requests away from the database. The database's conditional update and constraints are the <strong>source of truth</strong>. If the Redis lock were somehow wrong (expired early, split-brain during failover), the DB's <code>WHERE status='AVAILABLE'</code> still prevents a double-hold — it would just cost an extra failed UPDATE instead of being filtered upstream.</p>
+      <blockquote>💡 <strong>Interview signal:</strong> This is a direct callback to Chapter 29 Lesson 3's single-key CAS for preventing driver double-booking — same primitive (atomic conditional write), but here the contention is orders of magnitude higher and the "hold" persists for human-scale time (minutes), not milliseconds. If an interviewer pushes on Redlock's safety guarantees (the Kleppmann critique — clock drift, GC pauses, failover), the defensible answer is exactly this: don't rely on the lock alone for correctness, rely on it for load-shedding, and let the transactional store enforce the actual invariant.</blockquote>
+
+      <h3>4. Race: Hold Expires While Payment Is In Flight</h3>
+      <p>A subtle timing bug: a user's hold TTL is 10 minutes, but their payment provider takes 10 minutes and 5 seconds to respond (network hiccup, 3D-Secure delay). The seat auto-releases and gets re-sold to someone else — then the first payment succeeds against a seat that's no longer theirs.</p>
+      <pre><code>Fix: confirmBooking() re-validates ownership before committing:
+
+def confirm_booking(holdId, paymentToken):
+    hold = GET hold record for holdId
+    if hold.status != "HELD" or hold.expires_at < NOW():
+        # seat was released/resold in the meantime
+        REFUND(paymentToken)          # payment succeeded but hold is gone
+        return HOLD_EXPIRED_ERROR      # never silently keep the charge
+    # still valid — proceed to atomic HELD → BOOKED transition</code></pre>
+      <p>The fix isn't a longer TTL (that just delays the same race) — it's ensuring the system always checks hold validity <em>at</em> the moment of committing payment, and automatically refunds rather than silently keeping money for a seat that's gone.</p>
+
+      <h3>5. Idempotency for Payment Confirmation</h3>
+      <p>Networks retry. If a client (or a proxy) resends <code>confirmBooking()</code> after a timeout — even though the first attempt actually succeeded — the system must not double-charge or attempt to re-book an already-BOOKED seat:</p>
+      <pre><code>confirmBooking(holdId, paymentToken, idempotencyKey)
+  → CHECK: has idempotencyKey been seen before?
+      yes → return the SAME result as the original request (no reprocessing)
+      no  → process normally, store {idempotencyKey: result} before returning</code></pre>
+      <blockquote>💡 <strong>Interview signal:</strong> Idempotency keys are a small addition but a frequently-probed one — naming this unprompted, right after discussing retries, shows you're thinking about failure modes end-to-end rather than just the happy path.</blockquote>
+
+      <h2>Key Takeaways</h2>
+      <ul>
+        <li>Redis locks are a cheap, in-memory filter that absorb the overwhelming majority of doomed contention — they are not, by themselves, the correctness guarantee</li>
+        <li>The database's conditional update (WHERE status='AVAILABLE') plus a uniqueness constraint is the actual source of truth for "this seat was sold exactly once"</li>
+        <li>Hold-expiry races during payment must be handled by re-validating at commit time and refunding, not by simply extending the TTL</li>
+        <li>Idempotency keys on confirmBooking() prevent retries from double-charging or double-booking</li>
+        <li>This is the same atomic-conditional-write primitive as Chapter 29's driver-assignment CAS, applied at far higher contention and human-scale hold durations</li>
+      </ul>
+      <h2>Interview Tips</h2>
+      <ul>
+        <li>Never present a distributed lock alone as sufficient for a business-critical invariant — pair it with a transactional, constraint-backed source of truth</li>
+        <li>If asked about Redlock specifically, name its known weaknesses (clock drift, GC pauses, failover) rather than presenting it as a solved problem</li>
+        <li>Proactively raise the hold-expires-mid-payment race — it's a near-guaranteed follow-up once holds and TTLs are on the table</li>
+        <li>Mention idempotency keys for any payment-confirming endpoint before being asked</li>
+      </ul>
+    </article>
 
     <!-- Mark Complete -->
     <div class="complete-bar">

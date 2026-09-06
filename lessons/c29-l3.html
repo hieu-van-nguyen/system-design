@@ -494,7 +494,7 @@ body {
         <div class="lesson-meta-item">
           <span class="lesson-type-badge badge-lesson">lesson</span>
         </div>
-        <div class="lesson-meta-item">⏱ 10 min</div>
+        <div class="lesson-meta-item">⏱ 14 min</div>
         <div class="lesson-meta-item">📖 Chapter 29, Lesson 4</div>
       </div>
     </div>
@@ -503,9 +503,10 @@ body {
     <div class="objectives">
       <h3>🎯 Learning Objectives</h3>
       <ul>
-                <li>Understand the core concepts of: Deep Dive — Surge Pricing &amp; Analytics</li>
-                <li>Identify key tradeoffs and design decisions</li>
-                <li>Apply this knowledge in a system design interview</li>
+                <li>Compute a per-cell demand:supply ratio over a rolling window and derive a capped, smoothed surge multiplier</li>
+                <li>Design the streaming pipeline (Kafka → windowed aggregation → multiplier cache) that keeps this fresh at scale</li>
+                <li>Explain why fares are locked at quote time and the risk that creates</li>
+                <li>Justify real-time vs. batch computation for different pieces of the pricing pipeline</li>
               </ul>
     </div>
 
@@ -513,7 +514,76 @@ body {
 
     <!-- Lesson Body -->
     <article class="lesson-body">
-      <h2>Deep Dive — Surge Pricing &amp;amp; Analytics</h2><p>This lesson covers the key concepts, tradeoffs, and interview patterns for <strong>Deep Dive — Surge Pricing &amp;amp; Analytics</strong>.</p><blockquote>Content for this lesson is being prepared. Check back soon!</blockquote><h2>Key Takeaways</h2><ul><li>Always clarify requirements before designing</li><li>Consider scale, availability, and consistency tradeoffs</li><li>Justify your technology choices with concrete reasoning</li><li>Know when to use SQL vs NoSQL, cache vs no cache</li></ul><h2>Interview Tips</h2><ul><li>Draw the architecture diagram first, then explain components</li><li>Think out loud — interviewers value your reasoning process</li><li>Acknowledge what you don&#039;t know and explain how you&#039;d find out</li><li>Ask clarifying questions: read vs write heavy? consistency requirements?</li></ul>    </article>
+      <h2>Deep Dive — Surge Pricing &amp; Analytics</h2>
+      <p>Lesson 3 already gave surge its trigger: when a cell's shortlist is exhausted (radius expanded to the max and still no accept), that's a live demand-exceeds-supply signal. Surge pricing formalizes that signal into a continuously-updated multiplier per geo-cell, computed from the same location and ride-request data already flowing through the system.</p>
+
+      <h3>1. Defining the Signal: Demand:Supply per Cell</h3>
+      <pre><code>For each geohash cell (same ~1km cells as the driver location index, Lesson 2):
+  demand  = ride requests originating in this cell, last 5 minutes
+  supply  = available (not "assigned"/"en_route") drivers currently in this cell
+
+  ratio = demand / max(supply, 1)   // avoid divide-by-zero when supply is 0
+
+Example: cell has 40 requests in 5 min, 10 available drivers → ratio = 4.0</code></pre>
+      <p>A rolling window (5 minutes) rather than an instantaneous snapshot smooths out noise from individual ride requests arriving in bursts — a single spike of 3 requests in one second shouldn't swing prices, but a sustained imbalance should.</p>
+
+      <h3>2. From Ratio to Multiplier: Caps and Smoothing</h3>
+      <pre><code>multiplier = clamp(1.0 + log(ratio), 1.0, 3.0)   // caps: never below 1.0x, never above 3.0x
+new_multiplier = 0.7 * old_multiplier + 0.3 * multiplier   // exponential smoothing
+
+// log() compresses the impact of extreme ratios (ratio=20 shouldn't be 20x);
+// smoothing prevents the multiplier from jumping every time the window recomputes,
+// which would make fares visibly flicker between consecutive rider requests seconds apart.</code></pre>
+      <blockquote>💡 <strong>Interview signal:</strong> Naming both a cap (business/regulatory reasons — no 20x surge) and smoothing (product reasons — riders shouldn't see the price jump between two requests 10 seconds apart) shows you're thinking beyond "just multiply by the ratio."</blockquote>
+
+      <h3>3. Streaming Pipeline</h3>
+      <pre><code>Ride requests ──┐
+                 ├──► Kafka topic "pricing_events" ──► Stream processor
+Driver status ───┘        (demand + supply events)     (5-min tumbling/sliding
+                                                          window, keyed by geohash cell)
+                                                                 │
+                                                                 ▼
+                                                    Multiplier cache (Redis)
+                                                    key: surge:{geohash} → multiplier
+                                                                 │
+                                                                 ▼
+                                                    Pricing Service reads on
+                                                    every fare quote (O(1) lookup)</code></pre>
+      <p>This mirrors Lesson 2's split between the hot live-location path and the cold analytics path: the windowed aggregation is real-time (seconds of lag, driven by Kafka + a stream processor like Flink/Kafka Streams), while long-term surge-pattern analysis (e.g., predicting tomorrow's rush-hour surge) runs as an offline batch job against the same event stream, feeding a separate historical model rather than the live cache.</p>
+
+      <h3>4. Price-Lock at Quote Time</h3>
+      <p>The multiplier fluctuates continuously, but a rider's fare must not change after they've committed to a ride:</p>
+      <pre><code>requestRide() → read surge:{geohash} multiplier NOW → compute quoted_fare
+             → store quoted_fare on the ride record (immutable once matched)
+             → rider sees and accepts quoted_fare, not a live-updating one</code></pre>
+      <p>This creates a real tradeoff: between quote and match (seconds, per Lesson 3's dispatch flow), the true supply/demand ratio may have shifted — Uber eats that gap rather than re-quoting mid-flow. It's a deliberate consistency-vs-freshness tradeoff: the price is "consistent" (locked) from the rider's perspective even though the underlying signal is only eventually accurate.</p>
+      <blockquote>💡 <strong>Interview signal:</strong> Calling out that the fare is locked at quote time — and stating explicitly who absorbs the risk if conditions change before match — is the kind of product-aware detail that distinguishes a strong answer from one that only describes the pricing formula.</blockquote>
+
+      <h3>5. Real-Time vs. Batch: What Goes Where</h3>
+      <table>
+        <thead><tr><th>Component</th><th>Real-time or batch?</th><th>Why</th></tr></thead>
+        <tbody>
+          <tr><td>Per-cell multiplier (drives live fares)</td><td>Real-time (stream, seconds of lag)</td><td>Directly affects every fare quote; staleness is user-visible</td></tr>
+          <tr><td>Surge-pattern forecasting (e.g., anticipate Friday 6pm demand)</td><td>Batch (nightly/hourly job)</td><td>Feeds pre-positioning driver incentives, not an individual fare — tolerates hours of lag</td></tr>
+          <tr><td>Fairness/audit reporting (did surge disproportionately affect a region?)</td><td>Batch</td><td>Retrospective analysis over large time windows, not latency-sensitive</td></tr>
+        </tbody>
+      </table>
+
+      <h2>Key Takeaways</h2>
+      <ul>
+        <li>Surge is a windowed demand:supply ratio per geo-cell, not an instantaneous snapshot — the 5-minute window and exponential smoothing both exist to prevent noisy, flickering prices</li>
+        <li>The multiplier formula needs an explicit cap for business/regulatory reasons, not just a raw ratio</li>
+        <li>The same hot/cold split from Lesson 2 applies again: real-time stream aggregation feeds the live multiplier cache, batch jobs handle forecasting and audit over the same event stream</li>
+        <li>Fares are locked at quote time — a deliberate tradeoff that favors rider trust over pricing freshness during the match window</li>
+      </ul>
+      <h2>Interview Tips</h2>
+      <ul>
+        <li>Give the concrete formula (ratio → log-compressed, capped, smoothed multiplier) rather than saying "we compute surge based on demand"</li>
+        <li>Reuse the geohash cells from the location index (Lesson 2) as the pricing granularity — don't invent a separate spatial partitioning</li>
+        <li>State explicitly that price is locked at quote time, and name who bears the risk if conditions shift before the ride is matched</li>
+        <li>Separate what must be real-time (the live multiplier) from what can be batch (forecasting, audits) — putting everything in one pipeline is a common overreach</li>
+      </ul>
+    </article>
 
     <!-- Mark Complete -->
     <div class="complete-bar">

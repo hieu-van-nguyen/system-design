@@ -489,7 +489,7 @@ body {
         <div class="lesson-meta-item">
           <span class="lesson-type-badge badge-lesson">lesson</span>
         </div>
-        <div class="lesson-meta-item">⏱ 14 min</div>
+        <div class="lesson-meta-item">⏱ 15 min</div>
         <div class="lesson-meta-item">📖 Chapter 28, Lesson 2</div>
       </div>
     </div>
@@ -498,9 +498,10 @@ body {
     <div class="objectives">
       <h3>🎯 Learning Objectives</h3>
       <ul>
-                <li>Understand the core concepts of: Deep Dive — QuadTree &amp; Geospatial Index</li>
-                <li>Identify key tradeoffs and design decisions</li>
-                <li>Apply this knowledge in a system design interview</li>
+                <li>Compare fixed grid, geohash, and QuadTree spatial indexing structures</li>
+                <li>Design QuadTree subdivision using a tunable max-places-per-leaf threshold</li>
+                <li>Implement range search that correctly handles queries near cell boundaries</li>
+                <li>Separate spatial candidate retrieval from exact-distance and category post-filtering</li>
               </ul>
     </div>
 
@@ -508,7 +509,73 @@ body {
 
     <!-- Lesson Body -->
     <article class="lesson-body">
-      <h2>Deep Dive — QuadTree &amp;amp; Geospatial Index</h2><p>This lesson covers the key concepts, tradeoffs, and interview patterns for <strong>Deep Dive — QuadTree &amp;amp; Geospatial Index</strong>.</p><blockquote>Content for this lesson is being prepared. Check back soon!</blockquote><h2>Key Takeaways</h2><ul><li>Always clarify requirements before designing</li><li>Consider scale, availability, and consistency tradeoffs</li><li>Justify your technology choices with concrete reasoning</li><li>Know when to use SQL vs NoSQL, cache vs no cache</li></ul><h2>Interview Tips</h2><ul><li>Draw the architecture diagram first, then explain components</li><li>Think out loud — interviewers value your reasoning process</li><li>Acknowledge what you don&#039;t know and explain how you&#039;d find out</li><li>Ask clarifying questions: read vs write heavy? consistency requirements?</li></ul>    </article>
+      <h2>Deep Dive — QuadTree &amp; Geospatial Index</h2>
+      <p>Lesson 1 established that scanning 200M places per query is infeasible, and that the ~5GB spatial index fits comfortably in memory. This lesson designs that index — the structure that turns "give me everything within 2km of (lat, lng)" into a fast, bounded lookup instead of a linear scan.</p>
+
+      <h3>1. Spatial Indexing Options</h3>
+      <table>
+        <thead><tr><th>Structure</th><th>How it works</th><th>Tradeoff</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Fixed grid</strong></td><td>Divide the map into equal-size cells (e.g., 1km²); each cell lists the places inside it</td><td>Simple, but wastes cells over oceans/deserts and undersizes cells in dense cities — one-size-fits-all granularity doesn't match real place density</td></tr>
+          <tr><td><strong>Geohash</strong></td><td>Encode lat/lng into a base32 string where shared prefixes mean spatial proximity; index by string prefix</td><td>Simple to shard (prefix ranges) and store in any KV store, but has awkward edge cases at grid-cell boundaries and the poles</td></tr>
+          <tr><td><strong>QuadTree</strong></td><td>Recursively subdivide a region into four quadrants only where place density is high</td><td>Adapts cell size to density (small cells in Manhattan, large cells in rural areas) — the best fit for highly uneven place distribution, at the cost of a more complex structure to build/traverse</td></tr>
+        </tbody>
+      </table>
+      <p>We use a QuadTree: place density varies by orders of magnitude between a dense downtown and a rural highway, and a QuadTree is the only one of the three that adapts its resolution to that variance automatically.</p>
+
+      <h3>2. QuadTree Structure &amp; Subdivision</h3>
+      <pre><code>QuadTreeNode:
+  boundary: (minLat, minLng, maxLat, maxLng)
+  places:   list of place_ids in this node       // only populated on leaf nodes
+  children: [NW, NE, SW, SE]  or  null (leaf)
+
+MAX_PLACES_PER_LEAF = 500   // subdivide once a leaf exceeds this
+
+insert(node, place):
+  if node is leaf and len(node.places) &lt; MAX_PLACES_PER_LEAF:
+      node.places.append(place)
+      return
+  if node is leaf:                      // over threshold — subdivide
+      node.children = split into 4 quadrants
+      redistribute node.places among the 4 children
+      node.places = null
+  insert(child containing place.location, place)</code></pre>
+      <p>The ~500-places-per-leaf threshold is a tunable knob: a smaller threshold means finer resolution (more, smaller leaves) at the cost of a deeper tree; a larger threshold means fewer index lookups but coarser candidate sets that need more post-filtering.</p>
+      <blockquote>💡 <strong>Interview signal:</strong> Naming a concrete subdivision threshold (e.g., 500) rather than leaving it abstract shows you understand this is a tunable, measurable parameter — expect a follow-up like "what if 500 is too coarse for Manhattan?"</blockquote>
+
+      <h3>3. Range Search &amp; Neighbor-Cell Traversal</h3>
+      <pre><code>search(node, queryCenter, radius):
+  if node.boundary does not intersect the search circle: return []
+  if node is leaf:
+      return [p in node.places if distance(p, queryCenter) &lt;= radius]
+  results = []
+  for child in node.children:
+      results += search(child, queryCenter, radius)     // recurse into overlapping quadrants only
+  return results</code></pre>
+      <p>The tricky case: a search radius near a leaf's boundary can include places that live in a <em>neighboring</em> leaf, not just the leaf containing the query point. The traversal above handles this naturally by recursing into every child whose boundary <em>intersects</em> the search circle — not just the one containing the center point — so results correctly span leaf boundaries.</p>
+      <blockquote>💡 <strong>Interview signal:</strong> Interviewers frequently probe "what if the user is standing right at the edge of a cell?" — answering with "intersect the search circle against node boundaries, not just point-in-node containment" is the expected fix.</blockquote>
+
+      <h3>4. Post-Filtering</h3>
+      <ul>
+        <li>The QuadTree returns <em>candidates</em> whose bounding cell intersects the search radius — a final exact-distance check and category filter are applied after retrieval</li>
+        <li>Category/keyword filters are applied post-retrieval rather than baked into the tree structure — the tree only needs to be one thing (a spatial index) done well</li>
+      </ul>
+
+      <h2>Key Takeaways</h2>
+      <ul>
+        <li>A QuadTree adapts cell granularity to place density, unlike a fixed grid or geohash — critical given how unevenly places are distributed</li>
+        <li>Subdivision is governed by a tunable max-places-per-leaf threshold, trading tree depth against candidate-set size</li>
+        <li>Range search must recurse into any child whose <em>boundary</em> intersects the search circle, not just the leaf containing the query point, to avoid missing edge-of-cell results</li>
+        <li>The tree returns candidates by bounding-box overlap; exact distance and category filtering happen as a post-retrieval pass</li>
+      </ul>
+      <h2>Interview Tips</h2>
+      <ul>
+        <li>Justify QuadTree over grid/geohash by pointing at uneven place density — don't just assert it's the standard answer</li>
+        <li>State the leaf-size threshold as a concrete, tunable number, and be ready to discuss the depth-vs-candidate-set tradeoff</li>
+        <li>Preempt the boundary-edge-case question by explaining bounding-box intersection in the traversal, before the interviewer asks</li>
+        <li>Keep the tree single-purpose (location only) — resist folding category filters into the tree structure itself</li>
+      </ul>
+    </article>
 
     <!-- Mark Complete -->
     <div class="complete-bar">

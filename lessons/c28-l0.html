@@ -489,7 +489,7 @@ body {
         <div class="lesson-meta-item">
           <span class="lesson-type-badge badge-lesson">lesson</span>
         </div>
-        <div class="lesson-meta-item">⏱ 8 min</div>
+        <div class="lesson-meta-item">⏱ 13 min</div>
         <div class="lesson-meta-item">📖 Chapter 28, Lesson 1</div>
       </div>
     </div>
@@ -498,9 +498,10 @@ body {
     <div class="objectives">
       <h3>🎯 Learning Objectives</h3>
       <ul>
-                <li>Understand the core concepts of: Requirements &amp; Location-Based Search</li>
-                <li>Identify key tradeoffs and design decisions</li>
-                <li>Apply this knowledge in a system design interview</li>
+                <li>Frame clarifying questions around static vs. moving entities and ranking strategy</li>
+                <li>Derive search QPS (avg/peak) and place-count-driven storage estimates from DAU</li>
+                <li>Size full place data separately from the spatial index to justify an in-memory index</li>
+                <li>Justify why this is a read-heavy, eventually-consistent design problem</li>
               </ul>
     </div>
 
@@ -508,7 +509,94 @@ body {
 
     <!-- Lesson Body -->
     <article class="lesson-body">
-      <h2>Requirements &amp;amp; Location-Based Search</h2><p>This lesson covers the key concepts, tradeoffs, and interview patterns for <strong>Requirements &amp;amp; Location-Based Search</strong>.</p><blockquote>Content for this lesson is being prepared. Check back soon!</blockquote><h2>Key Takeaways</h2><ul><li>Always clarify requirements before designing</li><li>Consider scale, availability, and consistency tradeoffs</li><li>Justify your technology choices with concrete reasoning</li><li>Know when to use SQL vs NoSQL, cache vs no cache</li></ul><h2>Interview Tips</h2><ul><li>Draw the architecture diagram first, then explain components</li><li>Think out loud — interviewers value your reasoning process</li><li>Acknowledge what you don&#039;t know and explain how you&#039;d find out</li><li>Ask clarifying questions: read vs write heavy? consistency requirements?</li></ul>    </article>
+      <h2>Requirements &amp; Location-Based Search</h2>
+      <p>A "find nearby places" system (Yelp-style search for restaurants/shops) answers a deceptively simple question — <strong>which of millions of static points on a map fall within a radius of the user?</strong> — at a scale where scanning every place's coordinates on every query is a non-starter. The design hinges on building a spatial index that turns "search a radius" into a handful of lookups instead of a full table scan.</p>
+
+      <h3>1. Clarifying Questions</h3>
+      <table>
+        <thead><tr><th>Question</th><th>Why it matters</th></tr></thead>
+        <tbody>
+          <tr><td>Are places static (restaurants, shops) or moving (people, vehicles)?</td><td>Static places support a periodically-rebuilt spatial index; moving entities need a different structure (contrasted in Lesson 3)</td></tr>
+          <tr><td>What's the typical search radius — a few blocks or a whole city?</td><td>Drives how coarse/fine the spatial index's leaf granularity should be</td></tr>
+          <tr><td>How are results ranked — pure distance, rating, or a blend?</td><td>Determines whether the index alone can answer the query or a ranking pass is needed after retrieval (Lesson 3)</td></tr>
+          <tr><td>How often do places get added/updated (new business, hours change)?</td><td>Low write rate relative to reads means we can favor a read-optimized index over one built for fast writes</td></tr>
+          <tr><td>Do we need category/filter support (only show "coffee shops")?</td><td>Adds a filtering dimension on top of pure spatial retrieval</td></tr>
+        </tbody>
+      </table>
+      <p>For this design: static places, radius searches from ~1km to ~50km, ranking blends distance with rating, place updates are infrequent relative to searches, and category filters are supported.</p>
+
+      <h3>2. Functional Requirements</h3>
+      <ul>
+        <li>Given a lat/lng and radius, return nearby places ranked by relevance (distance + rating)</li>
+        <li>Support category/keyword filters on top of the spatial radius search</li>
+        <li>Add, update, and remove place records (name, category, coordinates, rating, hours)</li>
+        <li>Return results with pagination as the user pans/zooms the map</li>
+      </ul>
+
+      <h3>3. Non-Functional Requirements</h3>
+      <table>
+        <thead><tr><th>Attribute</th><th>Target</th></tr></thead>
+        <tbody>
+          <tr><td>Latency</td><td>Search p99 &lt; 100-200ms — users expect the map to populate near-instantly while panning</td></tr>
+          <tr><td>Scalability</td><td>Support hundreds of millions of places and tens of thousands of searches/sec</td></tr>
+          <tr><td>Consistency</td><td>Eventual consistency is fine — a new restaurant appearing in search a minute late is acceptable</td></tr>
+          <tr><td>Availability</td><td>Favor availability; a stale index beats a search that fails to return results</td></tr>
+        </tbody>
+      </table>
+      <blockquote>💡 <strong>Interview signal:</strong> Say explicitly "this is a read-heavy, write-light, eventually-consistent problem" up front — it justifies favoring a read-optimized spatial index that's periodically rebuilt rather than one engineered for real-time writes.</blockquote>
+
+      <h3>4. Traffic Estimation</h3>
+      <pre><code>Assumptions:
+  Total places        = 200,000,000  (200M)
+  DAU                 = 500,000,000  (500M)
+  Searches/user/day    = 5
+
+Searches/day  = 500M * 5                = 2,500,000,000 (2.5B)
+Searches/sec  = 2.5B / 86,400            ≈ 29,000 searches/sec (avg)
+Searches peak ≈ 29,000 * 3 (meal-time rush) ≈ 90,000 searches/sec (peak)
+
+Place writes are comparatively tiny — new businesses/updates measured in the
+thousands/day, not thousands/sec — so this is overwhelmingly a read-scaling problem.</code></pre>
+
+      <h3>5. Storage Estimation</h3>
+      <pre><code>Place record (name, address, category, hours, rating, description): ~1 KB/place
+  200M places * 1 KB                  ≈ 200 GB total place data
+
+Spatial index entry (place_id + lat + lng, the minimum needed to index by location):
+  place_id (8 bytes) + lat (8 bytes) + lng (8 bytes) = 24 bytes/place
+  200M * 24 bytes                     ≈ 4.8 GB  ≈ 5 GB
+
+// The ~5GB index is the key number: it comfortably fits in memory on a
+// handful of hosts. That means sharding the index is driven by *query
+// hotspots* (dense cities generating disproportionate traffic), not by
+// index size — a distinction that shapes the sharding strategy in Lesson 3.</code></pre>
+      <blockquote>💡 <strong>Interview signal:</strong> Computing that the index (~5GB) is orders of magnitude smaller than the full place data (~200GB) is the insight that unlocks "keep the spatial index in memory, fetch full place details from a separate store on a cache/index hit."</blockquote>
+
+      <h3>6. Interfaces (Internal)</h3>
+      <table>
+        <thead><tr><th>API</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td><code>searchNearby(lat, lng, radiusKm, filters, cursor) → places[], nextCursor</code></td><td>Primary read path — spatial index lookup + ranking (Lessons 2-3)</td></tr>
+          <tr><td><code>addPlace(placeData) → placeId</code></td><td>Insert a new place; updates the spatial index (batched/periodic, per NFRs)</td></tr>
+          <tr><td><code>updatePlace(placeId, fields)</code></td><td>Update mutable fields (hours, rating); coordinate changes are rare and trigger re-indexing</td></tr>
+        </tbody>
+      </table>
+
+      <h2>Key Takeaways</h2>
+      <ul>
+        <li>This is a read-heavy (~29K/sec avg, ~90K/sec peak), write-light, eventually-consistent problem — optimize for read latency</li>
+        <li>Full place data (~200GB) and the spatial index (~5GB) are sized separately — the index is small enough to live entirely in memory</li>
+        <li>Because writes are rare, the spatial index can be a structure optimized for read performance, even if rebuilding it is relatively expensive</li>
+        <li>Static places (this chapter's focus) allow periodic index rebuilds — moving entities would break that assumption (see Lesson 3)</li>
+      </ul>
+      <h2>Interview Tips</h2>
+      <ul>
+        <li>Lead with "static vs. moving entities" as your first clarifying question — it's the single biggest fork in the design</li>
+        <li>Compute the index size separately from the full dataset size — it's the number that justifies an in-memory spatial index</li>
+        <li>State the read:write imbalance explicitly; it's the reasoning behind every caching and indexing decision that follows</li>
+        <li>Don't over-specify ranking here — note that distance + rating are the inputs, and defer the scoring formula to the ranking lesson</li>
+      </ul>
+    </article>
 
     <!-- Mark Complete -->
     <div class="complete-bar">

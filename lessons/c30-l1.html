@@ -494,7 +494,7 @@ body {
         <div class="lesson-meta-item">
           <span class="lesson-type-badge badge-lesson">lesson</span>
         </div>
-        <div class="lesson-meta-item">⏱ 10 min</div>
+        <div class="lesson-meta-item">⏱ 14 min</div>
         <div class="lesson-meta-item">📖 Chapter 30, Lesson 2</div>
       </div>
     </div>
@@ -503,9 +503,10 @@ body {
     <div class="objectives">
       <h3>🎯 Learning Objectives</h3>
       <ul>
-                <li>Understand the core concepts of: High-Level Design &amp; Seat Reservation Flow</li>
-                <li>Identify key tradeoffs and design decisions</li>
-                <li>Apply this knowledge in a system design interview</li>
+                <li>Decompose the system into services (event catalog, venue, reservation, payment, notification)</li>
+                <li>Separate the immutable venue layout from the volatile seat-availability overlay, and cache each differently</li>
+                <li>Define the seat state machine (AVAILABLE → HELD → BOOKED) with its TTL-driven release path</li>
+                <li>Trace the end-to-end reservation flow from seat map view to confirmed booking</li>
               </ul>
     </div>
 
@@ -513,7 +514,75 @@ body {
 
     <!-- Lesson Body -->
     <article class="lesson-body">
-      <h2>High-Level Design &amp;amp; Seat Reservation Flow</h2><p>This lesson covers the key concepts, tradeoffs, and interview patterns for <strong>High-Level Design &amp;amp; Seat Reservation Flow</strong>.</p><blockquote>Content for this lesson is being prepared. Check back soon!</blockquote><h2>Key Takeaways</h2><ul><li>Always clarify requirements before designing</li><li>Consider scale, availability, and consistency tradeoffs</li><li>Justify your technology choices with concrete reasoning</li><li>Know when to use SQL vs NoSQL, cache vs no cache</li></ul><h2>Interview Tips</h2><ul><li>Draw the architecture diagram first, then explain components</li><li>Think out loud — interviewers value your reasoning process</li><li>Acknowledge what you don&#039;t know and explain how you&#039;d find out</li><li>Ask clarifying questions: read vs write heavy? consistency requirements?</li></ul>    </article>
+      <h2>High-Level Design &amp; Seat Reservation Flow</h2>
+      <p>Per Lesson 1, the design must isolate a tiny, hot, highly-contended dataset (seat status) from everything else. The architecture below draws that line explicitly: mostly-static data goes through a normal cache/CDN path, while seat status gets its own tightly-controlled path built around a state machine.</p>
+
+      <h3>1. Service Decomposition</h3>
+      <pre><code>                    ┌─────────────┐
+                    │ API Gateway │
+                    └──────┬──────┘
+          ┌────────────────┼──────────────────┬──────────────┐
+          ▼                 ▼                  ▼               ▼
+   ┌─────────────┐  ┌───────────────┐   ┌──────────────┐  ┌─────────────┐
+   │Event Catalog │  │ Venue Service  │   │ Reservation  │  │  Payment    │
+   │  Service     │  │ (seat map/     │   │  Service     │  │  Service    │
+   │ (search,     │  │  layout)       │   │ (hold/book,  │  │ (charge,    │
+   │  browse)     │  │                │   │  Lesson 3)   │  │  refund)    │
+   └─────────────┘  └───────┬────────┘   └──────┬───────┘  └─────────────┘
+                             │                    │
+                             ▼                    ▼
+                     Venue layout store    Seat status store
+                     (S3/CDN, immutable)   (Redis + DB, volatile,
+                                            Lesson 2/3)</code></pre>
+
+      <h3>2. Immutable Layout vs. Volatile Availability</h3>
+      <p>A venue's physical layout (section shapes, row/seat coordinates) almost never changes once an event is on sale. Seat <em>status</em> (available/held/booked) changes constantly, especially during a flash sale. Conflating the two — as a single "seat map" API — leads to the wrong caching answer for both halves:</p>
+      <table>
+        <thead><tr><th>Data</th><th>Change frequency</th><th>Caching strategy</th></tr></thead>
+        <tbody>
+          <tr><td>Venue layout (geometry, seat coordinates)</td><td>Effectively static per event</td><td>CDN-cacheable, long TTL (hours) — safe to serve stale</td></tr>
+          <tr><td>Seat availability overlay</td><td>Changes on every hold/release/booking, bursts during on-sale</td><td>Never CDN-cached; read from the live seat-status store, short-lived client-side cache (seconds) at most</td></tr>
+        </tbody>
+      </table>
+      <p>The client fetches the layout once (cache hit, cheap) and polls or subscribes (e.g., WebSocket/SSE) for the availability overlay only — a small, frequently-refreshed payload of just seat statuses, not the whole map.</p>
+      <blockquote>💡 <strong>Interview signal:</strong> Explicitly splitting "what rarely changes" from "what changes constantly" — and giving each an opposite caching answer — is exactly the kind of design instinct interviewers are listening for. Serving both from one cached endpoint is a common shortcut that breaks under a flash sale.</blockquote>
+
+      <h3>3. Seat State Machine</h3>
+      <pre><code>                 holdSeat()                confirmBooking()
+    AVAILABLE ──────────────► HELD ──────────────────────► BOOKED
+        ▲                      │  (payment succeeds)
+        │                      │
+        └──── TTL expiry ──────┘
+        └──── releaseHold() ───┘  (user cancels, or payment fails)</code></pre>
+      <p>A seat is never sold directly from AVAILABLE — every booking passes through a time-boxed HELD state (TTL ~10 minutes, matching how long checkout realistically takes). This is what makes the seat inventory behave like a small pool of leased resources rather than a simple boolean flag, and it's the state machine Lesson 3 builds concurrency control around.</p>
+
+      <h3>4. End-to-End Flow</h3>
+      <pre><code>1. Client → Venue Service: getSeatMap(eventId)       // cached layout + live status
+2. Client → Reservation Service: holdSeat(eventId, seatId, userId)
+     → seat: AVAILABLE → HELD, TTL 10 min            (Lesson 3: how this stays correct
+                                                        under massive concurrent attempts)
+3. Client → Payment Service: charge(holdId, paymentToken)
+4. Payment Service → Reservation Service: confirmBooking(holdId)
+     → seat: HELD → BOOKED (permanent)
+     → Notification Service: send ticket/confirmation
+5. If step 3/4 doesn't complete within the hold TTL:
+     → seat: HELD → AVAILABLE (automatic release, no manual cleanup needed)</code></pre>
+
+      <h2>Key Takeaways</h2>
+      <ul>
+        <li>Venue layout (immutable, CDN-cacheable) and seat availability (volatile, never CDN-cached) are architecturally separate concerns, not one "seat map" endpoint</li>
+        <li>Every seat passes through a time-boxed HELD state before BOOKED — this state machine is what later lessons build correctness and queueing around</li>
+        <li>A hold's TTL expiry is the default release path — no manual cleanup job is needed to reclaim abandoned holds</li>
+        <li>The reservation service owns the highest-contention write in the system; every other service (catalog, venue, payment) is comparatively low-contention</li>
+      </ul>
+      <h2>Interview Tips</h2>
+      <ul>
+        <li>Draw the layout/availability split before drawing services — it's the architectural decision everything else depends on</li>
+        <li>Name the seat state machine explicitly (AVAILABLE/HELD/BOOKED) rather than describing booking as a single atomic step</li>
+        <li>Explain the hold TTL in product terms (checkout time budget) as well as system terms (bounded resource lease)</li>
+        <li>Flag upfront that the reservation service's write path is where all the interesting concurrency problems live — it previews Lesson 3 well</li>
+      </ul>
+    </article>
 
     <!-- Mark Complete -->
     <div class="complete-bar">

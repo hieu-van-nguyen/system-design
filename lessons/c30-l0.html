@@ -494,7 +494,7 @@ body {
         <div class="lesson-meta-item">
           <span class="lesson-type-badge badge-lesson">lesson</span>
         </div>
-        <div class="lesson-meta-item">⏱ 7 min</div>
+        <div class="lesson-meta-item">⏱ 13 min</div>
         <div class="lesson-meta-item">📖 Chapter 30, Lesson 1</div>
       </div>
     </div>
@@ -503,9 +503,10 @@ body {
     <div class="objectives">
       <h3>🎯 Learning Objectives</h3>
       <ul>
-                <li>Understand the core concepts of: Requirements &amp; Estimations</li>
-                <li>Identify key tradeoffs and design decisions</li>
-                <li>Apply this knowledge in a system design interview</li>
+                <li>Scope Ticketmaster to seat reservation/checkout, and identify why flash on-sales are the design-defining case</li>
+                <li>Derive the peak contention ratio: hundreds of thousands of requests/sec against a tiny (~50K row) seat inventory</li>
+                <li>State non-functional requirements that prioritize correctness (no double-booking) over raw throughput</li>
+                <li>Define the core reservation interfaces used throughout the chapter</li>
               </ul>
     </div>
 
@@ -513,7 +514,100 @@ body {
 
     <!-- Lesson Body -->
     <article class="lesson-body">
-      <h2>Requirements &amp;amp; Estimations</h2><p>This lesson covers the key concepts, tradeoffs, and interview patterns for <strong>Requirements &amp;amp; Estimations</strong>.</p><blockquote>Content for this lesson is being prepared. Check back soon!</blockquote><h2>Key Takeaways</h2><ul><li>Always clarify requirements before designing</li><li>Consider scale, availability, and consistency tradeoffs</li><li>Justify your technology choices with concrete reasoning</li><li>Know when to use SQL vs NoSQL, cache vs no cache</li></ul><h2>Interview Tips</h2><ul><li>Draw the architecture diagram first, then explain components</li><li>Think out loud — interviewers value your reasoning process</li><li>Acknowledge what you don&#039;t know and explain how you&#039;d find out</li><li>Ask clarifying questions: read vs write heavy? consistency requirements?</li></ul>    </article>
+      <h2>Requirements &amp; Estimations</h2>
+      <p>Ticketmaster's hardest problem isn't scale in the usual sense — it's <strong>contention on a tiny, fixed dataset</strong>. When a popular event goes on sale, hundreds of thousands of requests arrive per second, all competing for a seat inventory as small as 50,000 rows. That ratio — not raw QPS — is what shapes this entire design.</p>
+
+      <h3>1. Clarifying Questions</h3>
+      <table>
+        <thead><tr><th>Question</th><th>Why it matters</th></tr></thead>
+        <tbody>
+          <tr><td>Is event discovery/search in scope, or just seat selection and checkout?</td><td>Scope to reservation + checkout; discovery is a separate read-heavy search problem (similar to Chapter 25/26's patterns)</td></tr>
+          <tr><td>Do we need to handle "flash sale" on-sales (e.g., a stadium tour announcing tickets at a fixed time)?</td><td>This is the design-defining case — assume yes; it's the reason a waiting room (Lesson 4) exists at all</td></tr>
+          <tr><td>General admission (just a count) or assigned seats?</td><td>Assigned seats is harder — assume assigned seats, since general admission is a strict subset (just a counter)</td></tr>
+          <tr><td>How long does a user get to complete payment after selecting a seat?</td><td>Sets the "hold" TTL — the seat is provisionally locked, not sold, for a bounded window (Lesson 2)</td></tr>
+          <tr><td>Must double-booking be impossible, or just rare?</td><td>Impossible — selling the same seat twice is a correctness failure, not a degraded-UX tradeoff</td></tr>
+        </tbody>
+      </table>
+
+      <h3>2. Functional Requirements</h3>
+      <ul>
+        <li>Users can view a venue's seat map and see real-time seat availability</li>
+        <li>Users can select one or more seats and place a temporary hold while completing payment</li>
+        <li>A hold that isn't confirmed within its TTL automatically releases the seat back to available</li>
+        <li>On successful payment, the seat transitions to permanently booked and is issued as a ticket</li>
+        <li>During a flash on-sale, excess demand is queued rather than allowed to overwhelm the reservation path</li>
+      </ul>
+
+      <h3>3. Non-Functional Requirements</h3>
+      <table>
+        <thead><tr><th>Attribute</th><th>Target</th></tr></thead>
+        <tbody>
+          <tr><td>Correctness</td><td>Zero double-booking under any concurrency scenario — this is non-negotiable, unlike most "eventual consistency is fine" NFRs elsewhere in this course</td></tr>
+          <tr><td>Availability under overload</td><td>Degrade gracefully (queue users, show wait times) rather than error out or crash during a flash sale spike</td></tr>
+          <tr><td>Latency</td><td>Seat map should feel real-time (~1s) to browsing users; hold confirmation should be near-instant for a user who reaches the front of any queue</td></tr>
+          <tr><td>Fairness</td><td>Under contention, no user should be able to unfairly cut ahead (e.g., via bot scripts hammering the endpoint) — addressed in Lesson 4</td></tr>
+        </tbody>
+      </table>
+      <blockquote>💡 <strong>Interview signal:</strong> Framing the hard requirement as "zero double-booking, not high throughput" early on tells the interviewer you've correctly identified this as a concurrency-correctness problem rather than a generic scale problem — the two call for very different designs.</blockquote>
+
+      <h3>4. Traffic Estimation</h3>
+      <pre><code>Assumptions:
+  Platform DAU (browsing, normal days)        = 10,000,000
+  Hot event seat inventory                    = 50,000 seats
+  Interested users hitting the on-sale drop   = 10,000,000
+  On-sale burst window                        ≈ 20 seconds
+
+Peak reservation requests/sec = 10,000,000 / 20s  ≈ 500,000 req/sec
+Seats available                               = 50,000
+
+Contention ratio = 500,000 req/sec : 50,000 seats  ≈ 200,000 competing
+  requests for every 20,000 seats sold per second (at best)
+  // ~99%+ of requests in the first seconds of a flash sale MUST fail
+  // gracefully (queued or told "sold out") — this is normal, expected
+  // behavior, not a system overload to be "fixed" with more servers.</code></pre>
+
+      <h3>5. Storage Estimation</h3>
+      <pre><code>Seat inventory per event: ~50,000 rows (seat_id, section, row, status, price)
+  // Small enough to fit entirely in memory for a single hot event —
+  // this is exactly why an in-memory lock (Redis) is viable at all
+  // (Lesson 3) — the dataset under contention is tiny, even if the
+  // request volume against it is enormous.
+
+Venue/seat map (layout, geometry): ~100 KB per venue, largely static
+  // Rarely changes — cacheable at the CDN, separate from live status (Lesson 2)
+
+Booking records (durable): user_id, seat_id, event_id, price, timestamp
+  ~1 KB/booking * 50,000 seats/event * 10,000 events/year ≈ 500 MB/year
+  // Tiny relative to the request volume — the storage problem here is
+  // contention, not capacity.</code></pre>
+      <blockquote>💡 <strong>Interview signal:</strong> Pointing out that the seat inventory is small enough to live entirely in a single cache node's memory reframes the whole problem: this isn't a sharding/partitioning challenge, it's a single-hot-key concurrency challenge — a very different (and more interesting) discussion.</blockquote>
+
+      <h3>6. Interfaces (Internal)</h3>
+      <table>
+        <thead><tr><th>API</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td><code>getSeatMap(eventId) → seats[](status, price)</code></td><td>Read path; serves the volatile availability overlay (Lesson 2)</td></tr>
+          <tr><td><code>holdSeat(eventId, seatId, userId) → holdId, expiresAt</code></td><td>Attempts to reserve a seat for a bounded window; this is the highest-contention write (Lesson 3)</td></tr>
+          <tr><td><code>confirmBooking(holdId, paymentToken) → bookingId</code></td><td>Finalizes payment and converts a hold into a permanent booking</td></tr>
+          <tr><td><code>releaseHold(holdId)</code></td><td>Explicit release (user cancels) or implicit release (TTL expiry)</td></tr>
+        </tbody>
+      </table>
+
+      <h2>Key Takeaways</h2>
+      <ul>
+        <li>The defining constraint is contention, not throughput: ~500K req/sec competing for as few as 50,000 seats during a flash sale</li>
+        <li>Zero double-booking is a hard correctness requirement, not a tunable availability/consistency tradeoff</li>
+        <li>The per-event seat inventory is small enough to fit in memory — this is what makes an in-memory concurrency primitive viable later in the chapter</li>
+        <li>Because most requests during a flash sale cannot succeed, graceful degradation (queueing, clear "sold out" signaling) is itself a functional requirement, not an afterthought</li>
+      </ul>
+      <h2>Interview Tips</h2>
+      <ul>
+        <li>Open by naming the contention ratio (requests vs. seats) — it immediately signals you understand what makes this problem hard</li>
+        <li>Distinguish correctness requirements (no double-booking) from availability requirements (browsing can degrade, booking cannot be wrong)</li>
+        <li>State explicitly that most flash-sale requests are expected to fail — designing as if everyone should get a seat is a common misstep</li>
+        <li>Ask whether assigned seating or general admission is in scope; assigned seating is the harder, more interesting case to design for</li>
+      </ul>
+    </article>
 
     <!-- Mark Complete -->
     <div class="complete-bar">

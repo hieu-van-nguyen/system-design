@@ -494,7 +494,7 @@ body {
         <div class="lesson-meta-item">
           <span class="lesson-type-badge badge-lesson">lesson</span>
         </div>
-        <div class="lesson-meta-item">⏱ 12 min</div>
+        <div class="lesson-meta-item">⏱ 14 min</div>
         <div class="lesson-meta-item">📖 Chapter 29, Lesson 3</div>
       </div>
     </div>
@@ -503,9 +503,10 @@ body {
     <div class="objectives">
       <h3>🎯 Learning Objectives</h3>
       <ul>
-                <li>Understand the core concepts of: Deep Dive — Ride Matching &amp; Dispatch</li>
-                <li>Identify key tradeoffs and design decisions</li>
-                <li>Apply this knowledge in a system design interview</li>
+                <li>Query nearby candidate drivers using the geohash index and rank them by road-network ETA, not straight-line distance</li>
+                <li>Design the offer/accept dispatch state machine, including timeouts and sequential vs. broadcast offers</li>
+                <li>Prevent double-booking with an atomic driver-lock (optimistic CAS) at accept time</li>
+                <li>Handle the no-driver-accepts case via radius expansion and requeueing</li>
               </ul>
     </div>
 
@@ -513,7 +514,84 @@ body {
 
     <!-- Lesson Body -->
     <article class="lesson-body">
-      <h2>Deep Dive — Ride Matching &amp;amp; Dispatch</h2><p>This lesson covers the key concepts, tradeoffs, and interview patterns for <strong>Deep Dive — Ride Matching &amp;amp; Dispatch</strong>.</p><blockquote>Content for this lesson is being prepared. Check back soon!</blockquote><h2>Key Takeaways</h2><ul><li>Always clarify requirements before designing</li><li>Consider scale, availability, and consistency tradeoffs</li><li>Justify your technology choices with concrete reasoning</li><li>Know when to use SQL vs NoSQL, cache vs no cache</li></ul><h2>Interview Tips</h2><ul><li>Draw the architecture diagram first, then explain components</li><li>Think out loud — interviewers value your reasoning process</li><li>Acknowledge what you don&#039;t know and explain how you&#039;d find out</li><li>Ask clarifying questions: read vs write heavy? consistency requirements?</li></ul>    </article>
+      <h2>Deep Dive — Ride Matching &amp; Dispatch</h2>
+      <p>Lesson 2 built the live driver-location index (Redis geohash, ~1M drivers, refreshed every ~4s). Matching turns that index into an actual assigned trip: find candidates, rank them, offer the ride, and guarantee exactly one driver ends up assigned — even though many riders and drivers act concurrently on overlapping geo-cells.</p>
+
+      <h3>1. Candidate Selection</h3>
+      <pre><code>1. Rider requests ride at (lat, lng)
+2. GEORADIUS driver_locations lng lat 2km ASC   // reuse Lesson 2's Redis geo-index
+   → returns driverIds sorted by straight-line distance, e.g. 15 candidates
+3. Filter to status == "available" (from driver:{id}:meta)
+4. Keep top ~5 by straight-line distance as an initial shortlist
+   // straight-line is cheap and good enough to shortlist; final ranking needs
+   // road-network distance, not haversine (below)</code></pre>
+      <p>Straight-line distance is used only to <em>shortlist</em> — a driver 400m away across a river or highway may be 8 minutes away by road, while one 800m away on a direct street is 3 minutes away. Ranking on haversine distance alone is a common interview mistake.</p>
+
+      <h3>2. ETA Ranking via Road-Network Routing</h3>
+      <table>
+        <thead><tr><th>Approach</th><th>Tradeoff</th></tr></thead>
+        <tbody>
+          <tr><td>Haversine (straight-line) distance</td><td>O(1), no external call — fine for shortlisting, wrong for final ranking (ignores roads, one-ways, traffic)</td></tr>
+          <tr><td>Road-network routing engine (e.g., precomputed graph + contraction hierarchies)</td><td>Accurate ETA, but too expensive to run against every online driver — run only against the ~5-driver shortlist</td></tr>
+        </tbody>
+      </table>
+      <p>The shortlist (cheap, wide) feeds the routing engine (expensive, narrow): 5 ETA lookups per ride request is affordable at ~350 requests/sec peak; 1M ETA lookups per request would not be.</p>
+      <blockquote>💡 <strong>Interview signal:</strong> Explicitly stating "cheap filter first, expensive rank second" — the same funnel shape used in search/recommendation systems — signals you generalize patterns rather than solving each system from scratch.</blockquote>
+
+      <h3>3. Offer / Accept Dispatch State Machine</h3>
+      <pre><code>REQUESTED → OFFERED(driver_1) → [accept]  → MATCHED → EN_ROUTE → ...
+                    │
+                    └──[reject/timeout 10s]──► OFFERED(driver_2) → ...
+                                                        │
+                                          (all shortlist exhausted)
+                                                        ▼
+                                          EXPAND RADIUS + REQUEUE (below)</code></pre>
+      <table>
+        <thead><tr><th>Dispatch style</th><th>Tradeoff</th></tr></thead>
+        <tbody>
+          <tr><td>Sequential offer (one driver at a time, 10s timeout)</td><td>Simple, fair (nearest gets first refusal), but adds latency if several drivers decline in a row — chosen default</td></tr>
+          <tr><td>Broadcast offer (offer to all 5 shortlisted drivers, first accept wins)</td><td>Lower worst-case latency, but wastes driver attention (4 of 5 offers are always "too late") and needs the same locking below to resolve the race</td></tr>
+        </tbody>
+      </table>
+
+      <h3>4. Preventing Double-Booking</h3>
+      <p>Whichever dispatch style is used, two riders' matching processes could race to assign the same driver at the same instant. Location data is eventually consistent (Lesson 1), but the accept step must not be:</p>
+      <pre><code>// Atomic compare-and-set on driver status, e.g. via Redis WATCH/MULTI or a Lua script
+def accept_ride(driverId, rideId):
+    status = GET driver:{driverId}:meta.status
+    if status != "available":
+        return CONFLICT   // already taken by another ride's accept
+    SET driver:{driverId}:meta.status = "assigned" IF status == "available"  // CAS, atomic
+    return OK</code></pre>
+      <p>This is a single-key optimistic CAS, not a distributed lock across services — it stays cheap (sub-millisecond) because the driver's status lives in one Redis key. The rider-facing ride record only transitions to <code>MATCHED</code> after this CAS succeeds, guaranteeing exactly one rider per driver per moment.</p>
+      <blockquote>💡 <strong>Interview signal:</strong> Naming this as "strong consistency scoped to a single key" ties directly back to Lesson 1's NFR — you don't need a distributed transaction across the whole system, just an atomic operation on the one piece of shared mutable state (driver status).</blockquote>
+
+      <h3>5. No Driver Accepts</h3>
+      <p>If the shortlist is exhausted (all 5 declined or timed out), don't fail the ride — expand and retry:</p>
+      <pre><code>attempt 1: radius = 2km  → shortlist of 5
+attempt 2: radius = 5km  → shortlist of 5 (excluding already-declined drivers)
+attempt 3: radius = 10km → shortlist of 5
+  // Each expansion also relaxes the ETA-quality bar shown to the rider
+  // ("your driver is a bit further away") rather than silently failing.
+If still no match after N attempts → surface "no drivers available," which
+is also a signal into the surge-pricing pipeline (Lesson 4): demand is
+exceeding supply in this cell.</code></pre>
+
+      <h2>Key Takeaways</h2>
+      <ul>
+        <li>Shortlist cheaply by straight-line distance from the geo-index, then rank the shortlist expensively by road-network ETA — never route every online driver</li>
+        <li>Sequential offer-with-timeout is the simpler default; broadcast offer trades driver attention for lower worst-case latency</li>
+        <li>Double-booking is prevented with a single-key atomic CAS on driver status, not a distributed lock — consistent with location being eventually consistent but assignment being strongly consistent</li>
+        <li>An exhausted shortlist triggers radius expansion and requeue, not failure — and feeds directly into surge-pricing demand signals</li>
+      </ul>
+      <h2>Interview Tips</h2>
+      <ul>
+        <li>Don't rank drivers by haversine distance alone — interviewers listen for the road-network/ETA distinction</li>
+        <li>State explicitly how double-booking is prevented before being asked — it's one of the most probed correctness questions in this design</li>
+        <li>Compare sequential vs. broadcast dispatch with a concrete tradeoff (latency vs. wasted driver attention), not just "broadcast is faster"</li>
+        <li>Always answer "what if no driver accepts?" — radius expansion, not an error, is the expected answer</li>
+      </ul>
+    </article>
 
     <!-- Mark Complete -->
     <div class="complete-bar">

@@ -494,7 +494,7 @@ body {
         <div class="lesson-meta-item">
           <span class="lesson-type-badge badge-lesson">lesson</span>
         </div>
-        <div class="lesson-meta-item">⏱ 10 min</div>
+        <div class="lesson-meta-item">⏱ 14 min</div>
         <div class="lesson-meta-item">📖 Chapter 30, Lesson 4</div>
       </div>
     </div>
@@ -503,9 +503,10 @@ body {
     <div class="objectives">
       <h3>🎯 Learning Objectives</h3>
       <ul>
-                <li>Understand the core concepts of: Deep Dive — Waiting Room &amp; Flash Sale</li>
-                <li>Identify key tradeoffs and design decisions</li>
-                <li>Apply this knowledge in a system design interview</li>
+                <li>Explain the waiting room as admission control that decouples arrival rate from reservation-service capacity</li>
+                <li>Design the queue mechanics: signed entry tokens and a Redis sorted-set position tracker</li>
+                <li>Compare FIFO ordering vs. randomized-lottery admission, and why randomization defeats bots</li>
+                <li>Trace a flash sale end-to-end through the waiting room into the reservation flow from Lesson 2</li>
               </ul>
     </div>
 
@@ -513,7 +514,74 @@ body {
 
     <!-- Lesson Body -->
     <article class="lesson-body">
-      <h2>Deep Dive — Waiting Room &amp;amp; Flash Sale</h2><p>This lesson covers the key concepts, tradeoffs, and interview patterns for <strong>Deep Dive — Waiting Room &amp;amp; Flash Sale</strong>.</p><blockquote>Content for this lesson is being prepared. Check back soon!</blockquote><h2>Key Takeaways</h2><ul><li>Always clarify requirements before designing</li><li>Consider scale, availability, and consistency tradeoffs</li><li>Justify your technology choices with concrete reasoning</li><li>Know when to use SQL vs NoSQL, cache vs no cache</li></ul><h2>Interview Tips</h2><ul><li>Draw the architecture diagram first, then explain components</li><li>Think out loud — interviewers value your reasoning process</li><li>Acknowledge what you don&#039;t know and explain how you&#039;d find out</li><li>Ask clarifying questions: read vs write heavy? consistency requirements?</li></ul>    </article>
+      <h2>Deep Dive — Waiting Room &amp; Flash Sale</h2>
+      <p>Per Lesson 1, ~500,000 requests/sec can arrive for 50,000 seats. Lesson 3's lock-plus-DB mechanism keeps that traffic <em>correct</em>, but the reservation service still can't usefully process 500K requests/sec of real DB work. The waiting room's job is to solve a different problem: not correctness, but <strong>admission control</strong> — controlling the rate at which traffic is even allowed to reach the reservation path.</p>
+
+      <h3>1. Why a Queue: Admission Control, Not a UI Feature</h3>
+      <p>It's tempting to treat the waiting room as cosmetic ("show people a spinner so they don't get mad"). Its real function is rate-matching:</p>
+      <pre><code>Measured reservation-service capacity: ~5,000 holdSeat() attempts/sec
+                                        it can process correctly end-to-end
+Incoming demand at on-sale moment:      ~500,000 req/sec
+
+Without admission control: 100x overload hits the reservation service
+  directly → Lesson 3's Redis lock still protects correctness, but response
+  latency degrades for everyone, including the ~5,000/sec who could have
+  been served fine.
+
+With admission control: queue absorbs the burst, releases into the
+  reservation service at ~5,000/sec — its actual measured throughput.</code></pre>
+      <blockquote>💡 <strong>Interview signal:</strong> Framing the queue's admit rate as "the reservation service's measured throughput," not an arbitrary number, shows you understand the waiting room as a capacity-matching mechanism — the same idea as backpressure in a streaming pipeline, applied at the user-request level.</blockquote>
+
+      <h3>2. Queue Mechanics</h3>
+      <pre><code>1. User hits the on-sale page → assigned a position:
+     ZADD waiting_room:{eventId} {arrival_timestamp} {userId}   // Redis sorted set
+2. Client polls (or holds an SSE connection) for its position:
+     ZRANK waiting_room:{eventId} {userId}  → "you are #48,203"
+3. Background admitter, running at the reservation service's safe rate:
+     every 200ms: pop next 1,000 users off the sorted set (5,000/sec)
+     → issue each a signed, short-lived entry token (JWT, ~2 min TTL)
+4. Client presents the entry token to the reservation service
+     → Reservation Service verifies signature + TTL, then proceeds to
+       Lesson 2's normal seat-selection/hold flow</code></pre>
+      <p>The sorted set gives O(log N) position tracking for millions of waiting users cheaply, and the signed token means the reservation service can verify "this request was legitimately admitted" without a database round trip or a call back to the queue service on every request.</p>
+
+      <h3>3. FIFO vs. Randomized Lottery Admission</h3>
+      <table>
+        <thead><tr><th>Admission order</th><th>Tradeoff</th></tr></thead>
+        <tbody>
+          <tr><td>FIFO (first arrival, first admitted)</td><td>Feels fair to humans, but rewards whoever's script/bot hits the page microseconds earlier — advantages automated traffic over real users</td></tr>
+          <tr><td>Randomized lottery (all arrivals within a short window get shuffled before admission)</td><td>Removes the reward for being fractions of a millisecond faster, which is specifically what bots optimize for — arriving first no longer guarantees admission first</td></tr>
+        </tbody>
+      </table>
+      <p>A practical middle ground: batch arrivals into short windows (e.g., 1 second), randomize order <em>within</em> each batch, then admit batches in arrival order. This keeps a coarse sense of "earlier is better" for real users while eliminating the sub-millisecond bot advantage that strict FIFO rewards.</p>
+      <blockquote>💡 <strong>Interview signal:</strong> Naming bots explicitly as the reason to avoid strict FIFO — rather than assuming all traffic is a real human clicking a button — reflects the actual adversarial nature of flash-sale traffic, which interviewers who've worked on this kind of system will specifically probe for.</blockquote>
+
+      <h3>4. Putting It Together: A Flash Sale End-to-End</h3>
+      <pre><code>1. On-sale time hits → 10M users land on the event page
+2. Waiting Room admits users at ~5,000/sec (batched, randomized within
+   each 1s window), issuing signed entry tokens
+3. Admitted user → Reservation Service: holdSeat() protected by Lesson 3's
+   Redis-lock-filter + DB-transaction-source-of-truth
+4. User completes payment within the hold TTL (Lesson 1/2) → BOOKED
+5. Users still waiting see a live position estimate; ~9.95M of the
+   original 10M eventually see "sold out" — by design, not failure
+   (per Lesson 1's contention ratio)</code></pre>
+
+      <h2>Key Takeaways</h2>
+      <ul>
+        <li>The waiting room performs admission control: it matches incoming request rate to the reservation service's actual measured processing capacity, not to how fast a spinner "feels"</li>
+        <li>A Redis sorted set gives cheap position tracking; signed, short-lived entry tokens let admitted requests skip a queue-service round trip</li>
+        <li>Strict FIFO admission unintentionally rewards bots; batching arrivals and randomizing within each batch removes the sub-millisecond advantage automation has over humans</li>
+        <li>The waiting room and the lock/DB mechanism from Lesson 3 solve different problems — capacity matching vs. correctness — and both are necessary</li>
+      </ul>
+      <h2>Interview Tips</h2>
+      <ul>
+        <li>Justify the admit rate with a number (measured downstream throughput), not "as fast as feels reasonable"</li>
+        <li>Bring up bots unprompted when discussing queue ordering — it's the detail that separates a surface-level answer from one grounded in how real flash sales are attacked</li>
+        <li>Keep the waiting room and the concurrency-control mechanism (Lesson 3) conceptually separate when explaining the design — conflating "queueing" with "locking" is a common confusion</li>
+        <li>Acknowledge upfront that the vast majority of waiting users will not get a seat, and that communicating this clearly is part of the design, not a UX afterthought</li>
+      </ul>
+    </article>
 
     <!-- Mark Complete -->
     <div class="complete-bar">
