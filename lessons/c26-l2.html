@@ -494,7 +494,7 @@ body {
         <div class="lesson-meta-item">
           <span class="lesson-type-badge badge-lesson">lesson</span>
         </div>
-        <div class="lesson-meta-item">⏱ 10 min</div>
+        <div class="lesson-meta-item">⏱ 14 min</div>
         <div class="lesson-meta-item">📖 Chapter 26, Lesson 3</div>
       </div>
     </div>
@@ -503,9 +503,10 @@ body {
     <div class="objectives">
       <h3>🎯 Learning Objectives</h3>
       <ul>
-                <li>Understand the core concepts of: Deep Dive — Politeness &amp; BFS vs DFS</li>
-                <li>Identify key tradeoffs and design decisions</li>
-                <li>Apply this knowledge in a system design interview</li>
+                <li>Explain why BFS-with-priority is the default crawl-order strategy, not pure DFS</li>
+                <li>Design a politeness policy that enforces per-host delay independent of overall system load</li>
+                <li>Recognize and mitigate crawler traps (infinite calendars, session-ID loops, deep pagination)</li>
+                <li>Cache and re-validate <code>robots.txt</code> without re-fetching it on every request</li>
               </ul>
     </div>
 
@@ -513,7 +514,66 @@ body {
 
     <!-- Lesson Body -->
     <article class="lesson-body">
-      <h2>Deep Dive — Politeness &amp;amp; BFS vs DFS</h2><p>This lesson covers the key concepts, tradeoffs, and interview patterns for <strong>Deep Dive — Politeness &amp;amp; BFS vs DFS</strong>.</p><blockquote>Content for this lesson is being prepared. Check back soon!</blockquote><h2>Key Takeaways</h2><ul><li>Always clarify requirements before designing</li><li>Consider scale, availability, and consistency tradeoffs</li><li>Justify your technology choices with concrete reasoning</li><li>Know when to use SQL vs NoSQL, cache vs no cache</li></ul><h2>Interview Tips</h2><ul><li>Draw the architecture diagram first, then explain components</li><li>Think out loud — interviewers value your reasoning process</li><li>Acknowledge what you don&#039;t know and explain how you&#039;d find out</li><li>Ask clarifying questions: read vs write heavy? consistency requirements?</li></ul>    </article>
+      <h2>Deep Dive — Politeness &amp; BFS vs DFS</h2>
+      <p>Lesson 2's front-queue/back-queue split gives us the mechanism for ordering and pacing crawls. This lesson covers the <em>policy</em> layered on top: which traversal order to use, and how to enforce politeness without a rogue page structure taking down the whole crawl.</p>
+
+      <h3>1. BFS vs DFS for Crawl Ordering</h3>
+      <table>
+        <thead><tr><th>Dimension</th><th>BFS (breadth-first)</th><th>DFS (depth-first)</th></tr></thead>
+        <tbody>
+          <tr><td>Coverage</td><td>Spreads across many hosts quickly — broad, even coverage</td><td>Exhausts one site's link graph before moving on</td></tr>
+          <tr><td>High-value pages</td><td>Pages with high in-degree (many inbound links) tend to be discovered early, near the seeds</td><td>No such guarantee — a popular page many hops deep is found late, or never, if a trap intervenes first</td></tr>
+          <tr><td>Crawler traps</td><td>A trap only consumes one host's back-queue slot at a time; other hosts keep progressing</td><td>A single infinite link chain (e.g., <code>?page=1,2,3,...</code>) can consume the entire crawl budget for one worker</td></tr>
+          <tr><td>Politeness fit</td><td>Naturally pairs with per-host back queues — one URL from host H, then move on</td><td>Repeatedly wants the <em>next</em> URL from the same host, fighting the politeness delay</td></tr>
+          <tr><td>Interview verdict</td><td><strong>Default choice</strong> — used in practice (Mercator, most production crawlers)</td><td>Rarely used standalone; occasionally combined with a strict per-host depth cap</td></tr>
+        </tbody>
+      </table>
+      <p>In practice this is "BFS with priority," not pure FIFO breadth-first: the Prioritizer from Lesson 2 biases which front queue gets drained next, so a high-priority page discovered at depth 5 can still be fetched before a low-priority page at depth 2. The breadth-first <em>property</em> we actually want is host diversity, not literal level-order traversal.</p>
+
+      <h3>2. Politeness Policy</h3>
+      <ul>
+        <li><strong>Per-host minimum delay</strong>: default (e.g., 1-2 sec) unless <code>robots.txt</code> specifies a longer <code>Crawl-delay</code> — enforced by the ready-time min-heap from Lesson 2, so it holds regardless of overall system load</li>
+        <li><strong>Concurrent-connections-per-host cap</strong>: normally 1; a handful for large, high-capacity sites that explicitly signal tolerance (e.g., <code>Crawl-delay: 0</code> plus a documented partnership)</li>
+        <li><strong>IP-level throttling</strong>: many distinct hostnames can resolve to one shared IP (small hosting providers, CDNs fronting multiple tenants) — enforcing politeness by hostname alone can still overwhelm a shared backend. Track delay state by <em>resolved IP</em> in addition to hostname when the reverse-DNS/ASN lookup indicates shared hosting.</li>
+      </ul>
+      <pre><code>function onHostReady(host):
+    if robotsCache[host].isExpired():
+        robotsCache[host] = fetchAndParseRobotsTxt(host)   // TTL ~24h
+
+    delay = max(DEFAULT_DELAY, robotsCache[host].crawlDelay)
+    url = backQueue[host].dequeue()
+    result = Fetcher.fetch(url)
+    backQueue[host].nextFetchTime = now() + delay
+    readyHeap.insert(host, backQueue[host].nextFetchTime)</code></pre>
+      <blockquote>💡 <strong>Interview signal:</strong> caching <code>robots.txt</code> with a TTL (rather than fetching it before every single page) is a detail that separates a toy answer from a production-grade one — robots.txt fetches would otherwise double your request volume per host.</blockquote>
+
+      <h3>3. Crawler Traps and Mitigation</h3>
+      <table>
+        <thead><tr><th>Trap pattern</th><th>Mitigation</th></tr></thead>
+        <tbody>
+          <tr><td>Infinite calendar pages (<code>/events?date=2024-01-01</code>, <code>...2024-01-02</code>, ...)</td><td>Cap max crawl depth per host; flag monotonically incrementing query params</td></tr>
+          <tr><td>Session-ID / tracking params creating unique URLs per request</td><td>URL normalization strips known tracking params before the dedup check (Lesson 4)</td></tr>
+          <tr><td>Deeply nested auto-generated pagination</td><td>Per-host page-count budget (e.g., max 100K pages/host/cycle); beyond the cap, deprioritize rather than block entirely</td></tr>
+          <tr><td>Dynamically generated near-duplicate pages under different paths</td><td>Content fingerprinting catches these post-fetch even if the URL looks novel (Lesson 4)</td></tr>
+        </tbody>
+      </table>
+      <p>Because politeness already caps how much of the crawl budget any single host can consume per unit time, BFS-with-priority plus a per-host page cap bounds the damage from any one trap to a small, predictable slice of total throughput — it can't starve the rest of the crawl.</p>
+
+      <h3>Key Takeaways</h3>
+      <ul>
+        <li>BFS-with-priority is the default because it maximizes host diversity and surfaces high-in-degree pages early — pure DFS risks total capture by a single host or trap</li>
+        <li>Politeness must be enforced independent of system load (the ready-time heap), by host <em>and</em> by resolved IP where hosting is shared</li>
+        <li>Cache <code>robots.txt</code> with a TTL — re-fetching it per page would double request volume</li>
+        <li>Bound crawler-trap damage with per-host depth and page-count caps rather than trying to detect every trap pattern upfront</li>
+      </ul>
+      <h3>Interview Tips</h3>
+      <ul>
+        <li>When asked "BFS or DFS," lead with the host-diversity argument, not just "BFS is simpler"</li>
+        <li>Bring up shared-IP throttling unprompted — it's an easy follow-up question interviewers use to test depth</li>
+        <li>Frame trap mitigation as bounding damage, not eliminating traps entirely — a crawler that tries to detect every trap pattern is over-engineered</li>
+        <li>Tie the politeness delay back to the ready-time heap from Lesson 2 rather than describing a new mechanism</li>
+      </ul>
+    </article>
 
     <!-- Mark Complete -->
     <div class="complete-bar">

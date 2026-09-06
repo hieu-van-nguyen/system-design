@@ -494,7 +494,7 @@ body {
         <div class="lesson-meta-item">
           <span class="lesson-type-badge badge-lesson">lesson</span>
         </div>
-        <div class="lesson-meta-item">⏱ 10 min</div>
+        <div class="lesson-meta-item">⏱ 14 min</div>
         <div class="lesson-meta-item">📖 Chapter 27, Lesson 4</div>
       </div>
     </div>
@@ -503,9 +503,10 @@ body {
     <div class="objectives">
       <h3>🎯 Learning Objectives</h3>
       <ul>
-                <li>Understand the core concepts of: Deep Dive — Feed Ranking Algorithm</li>
-                <li>Identify key tradeoffs and design decisions</li>
-                <li>Apply this knowledge in a system design interview</li>
+                <li>Explain the EdgeRank affinity × weight × time-decay scoring model</li>
+                <li>Design a two-stage retrieval-then-ranking pipeline for scoring at scale</li>
+                <li>Use a feature store to separate offline feature computation from online lookup</li>
+                <li>Balance batch vs. real-time re-ranking against a concrete p99 latency budget</li>
               </ul>
     </div>
 
@@ -513,7 +514,83 @@ body {
 
     <!-- Lesson Body -->
     <article class="lesson-body">
-      <h2>Deep Dive — Feed Ranking Algorithm</h2><p>This lesson covers the key concepts, tradeoffs, and interview patterns for <strong>Deep Dive — Feed Ranking Algorithm</strong>.</p><blockquote>Content for this lesson is being prepared. Check back soon!</blockquote><h2>Key Takeaways</h2><ul><li>Always clarify requirements before designing</li><li>Consider scale, availability, and consistency tradeoffs</li><li>Justify your technology choices with concrete reasoning</li><li>Know when to use SQL vs NoSQL, cache vs no cache</li></ul><h2>Interview Tips</h2><ul><li>Draw the architecture diagram first, then explain components</li><li>Think out loud — interviewers value your reasoning process</li><li>Acknowledge what you don&#039;t know and explain how you&#039;d find out</li><li>Ask clarifying questions: read vs write heavy? consistency requirements?</li></ul>    </article>
+      <h2>Deep Dive — Feed Ranking Algorithm</h2>
+      <p>Lessons 2-3 built the pipeline that gets candidate posts into (or reachable from) a user's feed. This lesson answers the last question: given a pool of candidate posts, <strong>in what order should they actually appear?</strong> Recency alone (the chronological fallback) ignores that a week-old post from a close friend is often more relevant than a stranger's post from five minutes ago.</p>
+
+      <h3>1. From EdgeRank to Modern Ranking</h3>
+      <p>Facebook's original public ranking formula, EdgeRank, scored each candidate post ("edge") as:</p>
+      <pre><code>score(edge) = affinity(viewer, author) × weight(edge_type) × time_decay(edge)
+
+  affinity    — how much the viewer historically interacts with this author
+                (likes, comments, profile visits, message frequency)
+  weight      — a static per-type weight (comment &gt; share &gt; like &gt; view,
+                photo/video &gt; plain text, tunable per content type)
+  time_decay  — score shrinks as post age increases, e.g. 1 / (age_hours + 2)</code></pre>
+      <p>EdgeRank is simple, explainable, and cheap to compute — a good baseline and still a useful mental model. Production systems replace the hand-tuned weight/decay terms with a learned model, but the three-factor shape (relationship strength × content signal × recency) still holds.</p>
+
+      <h3>2. Two-Stage Retrieval + Ranking</h3>
+      <p>Scoring every candidate post with a full ML model is too expensive to run over hundreds of candidates per feed load at 350K reads/sec peak. Production ranking splits into two stages:</p>
+      <table>
+        <thead><tr><th>Stage</th><th>Goal</th><th>Cost</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Retrieval (candidate generation)</strong></td><td>Cheaply narrow thousands of possible posts down to ~200-500 candidates (recent posts from friends/pages, celebrity fan-in merge from Lesson 3)</td><td>Cheap heuristics/light model — must run in single-digit ms</td></tr>
+          <tr><td><strong>Ranking</strong></td><td>Score the smaller candidate set with a full model using rich features, return top N for the requested page</td><td>More expensive per item, but bounded by the small candidate count</td></tr>
+        </tbody>
+      </table>
+      <blockquote>💡 <strong>Interview signal:</strong> Naming this as a two-stage funnel (cheap retrieval → expensive ranking on a small set) is the standard answer to "how would you rank without scoring every post in the system" — the same pattern shows up in search and recommendation systems generally.</blockquote>
+
+      <h3>3. Ranking Features &amp; Feature Store</h3>
+      <ul>
+        <li><strong>Viewer-author affinity</strong> — interaction history, precomputed and refreshed periodically, not recomputed per request</li>
+        <li><strong>Content features</strong> — post type, has-media, early engagement velocity (likes/comments in the first N minutes)</li>
+        <li><strong>Context features</strong> — time of day, device, viewer's recent session behavior</li>
+      </ul>
+      <pre><code>Ranking Service ──▶ Feature Store (low-latency KV lookup)
+                        keys: (viewerId, authorId) → affinity features
+                              (postId) → content + engagement-velocity features
+                        // Precomputed offline/streaming, served online read-only —
+                        // ranking-time work is feature lookup + model inference,
+                        // not feature computation.</code></pre>
+
+      <h3>4. Real-Time vs. Batch Re-Ranking</h3>
+      <table>
+        <thead><tr><th>Approach</th><th>Tradeoff</th></tr></thead>
+        <tbody>
+          <tr><td>Batch (precomputed ranking, refreshed periodically)</td><td>Cheaper, but stale — misses a post that suddenly goes viral in the last few minutes</td></tr>
+          <tr><td>Real-time (rank at request time using freshest features)</td><td>Captures viral/trending shifts immediately, but adds inference latency to every <code>getFeed()</code> call</td></tr>
+          <tr><td>Hybrid (used in practice)</td><td>Batch-rank the bulk of candidates; blend in a small set of real-time signals (e.g., engagement velocity in the last 10 min) at request time</td></tr>
+        </tbody>
+      </table>
+
+      <h3>5. Latency Budget</h3>
+      <pre><code>Target: getFeed() p99 &lt; 200ms (from Lesson 1's NFRs)
+
+  Candidate retrieval (cache + celebrity fan-in merge)   ~20-40ms
+  Feature store lookups (batched, parallel)              ~30-50ms
+  Model inference on ~200-500 candidates                 ~50-80ms
+  Serialization / network                                ~20-30ms
+  ────────────────────────────────────────────────────────────────
+  Total                                                  ~150-200ms  // fits the budget
+
+// If inference cost grows, the retrieval stage's candidate count is the
+// first lever to pull — fewer candidates into ranking, not a slower model.</code></pre>
+
+      <h2>Key Takeaways</h2>
+      <ul>
+        <li>EdgeRank's affinity × weight × time-decay shape is still the right mental model, even though production systems replace it with a learned model</li>
+        <li>Split ranking into cheap retrieval (narrow the candidate pool) and expensive ranking (score the small pool) — never full-model-score every post</li>
+        <li>Precompute features into a low-latency feature store; ranking time should be lookup + inference, not feature computation</li>
+        <li>Hybrid batch + real-time re-ranking captures viral content without paying real-time cost for every feature</li>
+        <li>When latency is tight, shrink the retrieval stage's candidate count before reaching for a faster/smaller ranking model</li>
+      </ul>
+      <h2>Interview Tips</h2>
+      <ul>
+        <li>Start from EdgeRank's three factors — it's a concrete, memorable baseline before you pivot to "in practice, this becomes a learned model"</li>
+        <li>Always propose the two-stage retrieval/ranking split — interviewers expect it as soon as candidate counts get large</li>
+        <li>Walk through a latency budget with rough per-stage numbers — it shows you're designing to the p99 target, not hand-waving "it's fast"</li>
+        <li>When asked "what if ranking gets too slow," reach for reducing candidates first, then model simplification — in that order</li>
+      </ul>
+    </article>
 
     <!-- Mark Complete -->
     <div class="complete-bar">

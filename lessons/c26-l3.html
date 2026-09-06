@@ -494,7 +494,7 @@ body {
         <div class="lesson-meta-item">
           <span class="lesson-type-badge badge-lesson">lesson</span>
         </div>
-        <div class="lesson-meta-item">⏱ 8 min</div>
+        <div class="lesson-meta-item">⏱ 14 min</div>
         <div class="lesson-meta-item">📖 Chapter 26, Lesson 4</div>
       </div>
     </div>
@@ -503,9 +503,10 @@ body {
     <div class="objectives">
       <h3>🎯 Learning Objectives</h3>
       <ul>
-                <li>Understand the core concepts of: Deep Dive — Deduplication &amp; Storage</li>
-                <li>Identify key tradeoffs and design decisions</li>
-                <li>Apply this knowledge in a system design interview</li>
+                <li>Normalize URLs so cosmetic variants map to a single canonical form</li>
+                <li>Size a Bloom filter for a 10B-entry URL-seen set and reason about its false-positive tradeoff</li>
+                <li>Detect exact and near-duplicate content using content hashing and SimHash</li>
+                <li>Design a page-store schema and sharding scheme sized against Lesson 1's 1.5 PB/month estimate</li>
               </ul>
     </div>
 
@@ -513,7 +514,96 @@ body {
 
     <!-- Lesson Body -->
     <article class="lesson-body">
-      <h2>Deep Dive — Deduplication &amp;amp; Storage</h2><p>This lesson covers the key concepts, tradeoffs, and interview patterns for <strong>Deep Dive — Deduplication &amp;amp; Storage</strong>.</p><blockquote>Content for this lesson is being prepared. Check back soon!</blockquote><h2>Key Takeaways</h2><ul><li>Always clarify requirements before designing</li><li>Consider scale, availability, and consistency tradeoffs</li><li>Justify your technology choices with concrete reasoning</li><li>Know when to use SQL vs NoSQL, cache vs no cache</li></ul><h2>Interview Tips</h2><ul><li>Draw the architecture diagram first, then explain components</li><li>Think out loud — interviewers value your reasoning process</li><li>Acknowledge what you don&#039;t know and explain how you&#039;d find out</li><li>Ask clarifying questions: read vs write heavy? consistency requirements?</li></ul>    </article>
+      <h2>Deep Dive — Deduplication &amp; Storage</h2>
+      <p>Two separate dedup problems hide inside "don't crawl the same thing twice": <strong>URL dedup</strong> (have we ever seen this exact URL?) and <strong>content dedup</strong> (is this page's content a duplicate of one we already have, even under a different URL — mirrors, tracking params, syndicated articles)? They need different data structures.</p>
+
+      <h3>1. URL Normalization</h3>
+      <p>Before any dedup check, canonicalize the URL — otherwise cosmetic differences masquerade as new pages:</p>
+      <table>
+        <thead><tr><th>Rule</th><th>Example</th></tr></thead>
+        <tbody>
+          <tr><td>Lowercase scheme + host</td><td><code>HTTP://Example.com</code> → <code>http://example.com</code></td></tr>
+          <tr><td>Strip default port</td><td><code>example.com:80/</code> → <code>example.com/</code></td></tr>
+          <tr><td>Remove fragment</td><td><code>/page#section2</code> → <code>/page</code></td></tr>
+          <tr><td>Strip known tracking params</td><td><code>?utm_source=x&amp;id=5</code> → <code>?id=5</code></td></tr>
+          <tr><td>Sort remaining query params</td><td><code>?b=2&amp;a=1</code> → <code>?a=1&amp;b=2</code></td></tr>
+          <tr><td>Resolve relative → absolute against base URL</td><td><code>../img.png</code> on <code>site.com/a/b</code> → <code>site.com/img.png</code></td></tr>
+          <tr><td>Normalize trailing slash consistently</td><td><code>/page/</code> ≡ <code>/page</code> (pick one convention)</td></tr>
+        </tbody>
+      </table>
+
+      <h3>2. URL-Seen Dedup: Bloom Filter</h3>
+      <p>Per Lesson 1, the discovered-URL universe is ~10B entries — far too large to hold in a hash set with reasonable memory. A Bloom filter trades a small, tunable false-positive rate for massive space savings, and its one-sided error is exactly the direction we can tolerate: a false positive means we <em>skip</em> a genuinely new URL (rare, acceptable data loss); a Bloom filter never produces a false negative, so we never accidentally re-crawl-loop on something it swears is new.</p>
+      <pre><code>Bloom filter sizing for n = 10,000,000,000 URLs, target false-positive rate p = 0.1%
+
+  m (bits) = -(n × ln(p)) / (ln 2)²
+           = -(10e9 × ln(0.001)) / (0.6931)²
+           = -(10e9 × -6.9078) / 0.4805
+           ≈ 143,776,000,000 bits
+           ≈ 17.97 GB   (~18 GB bit array)
+
+  k (hash functions) = (m / n) × ln 2
+           = (143.776e9 / 10e9) × 0.6931
+           ≈ 9.97 ≈ 10 hash functions
+
+→ An ~18 GB bit array with 10 hash functions comfortably fits in memory
+  on a handful of sharded nodes (shard by a prefix of the URL hash so
+  each node owns a slice of the bit space).</code></pre>
+      <blockquote>💡 <strong>Interview signal:</strong> stating the one-sided-error property out loud ("false positives only cost us a missed page, never a correctness bug") is what shows you understand <em>why</em> a Bloom filter is safe here, not just that it's space-efficient.</blockquote>
+
+      <h3>3. Content Dedup: Exact and Near-Duplicate</h3>
+      <table>
+        <thead><tr><th>Type</th><th>Technique</th><th>Catches</th></tr></thead>
+        <tbody>
+          <tr><td>Exact duplicate</td><td>SHA-1/MD5 hash of normalized page content; O(1) lookup against stored hashes</td><td>Byte-identical content served at a different URL (mirrors, re-hosted copies)</td></tr>
+          <tr><td>Near-duplicate</td><td>SimHash fingerprint: shingle the content into overlapping n-grams, hash and combine into a fixed-length (e.g., 64-bit) fingerprint where similar documents land close in Hamming distance</td><td>Boilerplate template pages, syndicated articles with a different header/footer/ad block, minor edits</td></tr>
+        </tbody>
+      </table>
+      <pre><code>// Near-duplicate check: is this fingerprint within Hamming distance 3
+// of any fingerprint we've already stored?
+//
+// Can't brute-force compare against 1B+ stored fingerprints per page.
+// Standard trick: split the 64-bit fingerprint into k bands, build an
+// index per band, and only compare candidates that match on at least
+// one band exactly — narrows millions of candidates down to a handful
+// before doing the expensive Hamming-distance comparison.
+
+isNearDuplicate(fp) = existsIndexedFingerprint(fp, maxHammingDistance=3)</code></pre>
+
+      <h3>4. Page Store Schema</h3>
+      <pre><code>PageRecord {
+  urlHash          // partition/shard key — consistent hashing across storage nodes
+  normalizedUrl
+  fetchTimestamp
+  httpStatus
+  contentHash      // exact-dup key
+  simhashFingerprint
+  rawContentRef    // pointer into blob storage (cold tier), not inline
+  outboundLinks[]
+  crawlPriority
+  nextCrawlTime    // adaptive recrawl scheduling
+}</code></pre>
+      <p>Sharding by <code>urlHash</code> (consistent hashing) spreads load evenly regardless of host popularity skew, since the shard key is independent of host. Per Lesson 1's estimate: 500 TB raw HTML/month × 3× replication ≈ 1.5 PB/month physical storage, plus ~500 GB of metadata that fits comfortably in a wide-column store.</p>
+
+      <h3>5. Adaptive Recrawl Scheduling</h3>
+      <p><code>nextCrawlTime</code> isn't fixed at 30 days for every page — pages observed to change frequently (content hash differs on successive crawls) get a shorter interval; static pages get progressively longer intervals, similar to exponential backoff run in reverse. This keeps the 386 pages/sec average budget spent where it matters instead of uniformly re-fetching pages that never change.</p>
+
+      <h3>Key Takeaways</h3>
+      <ul>
+        <li>URL dedup and content dedup are different problems needing different structures — normalize first, then Bloom-filter the URL, then fingerprint the content</li>
+        <li>A Bloom filter's one-sided error (false positives only, never false negatives) is exactly the tradeoff a crawler can safely accept</li>
+        <li>~18 GB / 10 hash functions covers a 10B-URL universe at a 0.1% false-positive rate — small enough to shard across a handful of nodes</li>
+        <li>SimHash + banded indexing catches near-duplicates that exact hashing misses, without brute-force comparing every page pair</li>
+        <li>Shard the page store by URL hash (not by host) to avoid hot-spotting on popular domains</li>
+      </ul>
+      <h3>Interview Tips</h3>
+      <ul>
+        <li>Always separate "have we seen this URL" from "have we seen this content" — interviewers frequently ask this as a direct follow-up</li>
+        <li>Walk through the Bloom filter math rather than citing the ~18 GB result — the derivation is the signal</li>
+        <li>If asked to reduce false positives further, discuss the direct cost tradeoff: halving <code>p</code> roughly adds another ~10 bits/element, not a free win</li>
+        <li>Mention adaptive recrawl scheduling — it shows you're optimizing the crawl budget, not just executing it uniformly</li>
+      </ul>
+    </article>
 
     <!-- Mark Complete -->
     <div class="complete-bar">

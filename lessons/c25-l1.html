@@ -489,7 +489,7 @@ body {
         <div class="lesson-meta-item">
           <span class="lesson-type-badge badge-lesson">lesson</span>
         </div>
-        <div class="lesson-meta-item">⏱ 12 min</div>
+        <div class="lesson-meta-item">⏱ 15 min</div>
         <div class="lesson-meta-item">📖 Chapter 25, Lesson 2</div>
       </div>
     </div>
@@ -498,9 +498,10 @@ body {
     <div class="objectives">
       <h3>🎯 Learning Objectives</h3>
       <ul>
-                <li>Understand the core concepts of: Deep Dive — Inverted Index &amp; Sharding</li>
-                <li>Identify key tradeoffs and design decisions</li>
-                <li>Apply this knowledge in a system design interview</li>
+                <li>Build the inverted index structure — term → posting list — and compress it with delta encoding + variable-byte integers</li>
+                <li>Design the real-time indexing pipeline: tweet → Kafka → tokenizer → in-memory segment → periodic on-disk merge</li>
+                <li>Compare document-based vs. term-based index partitioning, and explain why time-partitioned, document-based sharding is the standard choice for recency-biased search</li>
+                <li>Execute a scatter-gather query across shards and reason about its latency budget</li>
               </ul>
     </div>
 
@@ -508,7 +509,137 @@ body {
 
     <!-- Lesson Body -->
     <article class="lesson-body">
-      <h2>Deep Dive — Inverted Index &amp;amp; Sharding</h2><p>This lesson covers the key concepts, tradeoffs, and interview patterns for <strong>Deep Dive — Inverted Index &amp;amp; Sharding</strong>.</p><blockquote>Content for this lesson is being prepared. Check back soon!</blockquote><h2>Key Takeaways</h2><ul><li>Always clarify requirements before designing</li><li>Consider scale, availability, and consistency tradeoffs</li><li>Justify your technology choices with concrete reasoning</li><li>Know when to use SQL vs NoSQL, cache vs no cache</li></ul><h2>Interview Tips</h2><ul><li>Draw the architecture diagram first, then explain components</li><li>Think out loud — interviewers value your reasoning process</li><li>Acknowledge what you don&#039;t know and explain how you&#039;d find out</li><li>Ask clarifying questions: read vs write heavy? consistency requirements?</li></ul>    </article>
+      <h2>Deep Dive — Inverted Index &amp; Sharding</h2>
+
+      <h3>1. Inverted Index Structure</h3>
+      <p>An inverted index maps each unique term to the list of documents (tweets) containing it — the inverse of "document → terms," hence the name.</p>
+      <pre><code>
+term: "system"
+postings: [
+  { doc_id: 1002, tf: 1, positions: [3] },
+  { doc_id: 1050, tf: 2, positions: [0, 12] },
+  { doc_id: 2000, tf: 1, positions: [7] },
+  ...
+]
+
+// tf         = term frequency in this doc (rarely &gt; 2 for a 280-char tweet)
+// positions  = word offsets, needed ONLY if phrase/proximity search is required
+//              (dropped entirely for keyword-OR-only search — halves posting size)
+      </code></pre>
+
+      <h3>2. The Real-Time Indexing Pipeline</h3>
+      <p>Requirement from Lesson 1: a tweet must be searchable within ~5 seconds of posting. That rules out batch (e.g., nightly MapReduce) indexing — this must be a streaming pipeline.</p>
+      <pre><code>
+Tweet Created
+     │
+     ▼
+Kafka topic "tweet-events"  (partitioned by tweet_id, 7-day retention — doubles as a WAL, see Lesson 3)
+     │
+     ▼
+Indexing Consumer (per shard, consumes only its assigned partitions)
+     │  1. Tokenize: lowercase, split on whitespace/punctuation
+     │  2. Keep hashtags (#topic) and mentions (@user) as first-class tokens
+     │  3. Do NOT aggressively strip stopwords — short tweets rely on function
+     │     words for phrase queries ("to be or not to be")
+     │  4. Assign doc to this shard's TIME-BASED SEGMENT (see §4)
+     ▼
+In-memory segment (mutable, append-only — like a Lucene/LSM "memtable")
+     │  Every few minutes: flush to an immutable on-disk segment
+     ▼
+On-disk segment (immutable, delta+varint compressed — see §3)
+     │  Periodically: merge small segments into larger ones (compaction),
+     │  which is also where TOMBSTONED (deleted) doc IDs are physically purged
+     ▼
+Queryable index
+      </code></pre>
+
+      <h3>3. Posting List Compression</h3>
+      <p>Doc IDs are monotonically increasing as tweets are created. Storing them as raw 8-byte integers wastes space — delta encoding + variable-byte (varint) encoding shrinks them dramatically, because deltas between docs sharing a term are usually small.</p>
+      <pre><code>
+// Sorted doc IDs for term "system":
+raw:     [1002, 1050, 1051, 2000, 2001, 2002]
+
+// Delta-encode (store gap from previous, not absolute value):
+deltas:  [1002,   48,    1,  949,    1,    1]
+//         ^first entry stored as-is; rest are small numbers
+
+// Varint-encode: small numbers use fewer bytes (1 byte covers 0-127)
+// deltas of 1, 1, 1, 48  → 1 byte each
+// delta of 949           → 2 bytes
+// vs. 8 bytes/doc_id uncompressed → ~4-8x reduction for clustered postings
+
+// This is why Lesson 1's estimate used ~4 bytes/posting instead of 8-16 bytes:
+// most postings in a time-partitioned segment (§4) have small deltas by construction
+      </code></pre>
+
+      <h3>4. Partitioning Strategy: Document-Based vs. Term-Based</h3>
+      <p>The central sharding decision: does each shard own a subset of <em>documents</em> (with a complete mini-index over them), or a subset of <em>terms</em> (covering all documents)?</p>
+      <table>
+        <thead><tr><th>Aspect</th><th>Document-Based Partitioning</th><th>Term-Based Partitioning</th></tr></thead>
+        <tbody>
+          <tr><td>Shard contents</td><td>Complete inverted index over a subset of tweets (e.g., one time range)</td><td>Complete posting lists for a subset of the vocabulary, across ALL tweets</td></tr>
+          <tr><td>Query execution</td><td>Scatter-gather: fan out to every shard, each computes local top-K, merge at aggregator</td><td>Route to only the shards owning the query's terms — fewer shards touched</td></tr>
+          <tr><td>Hot key risk</td><td>Low — a trending hashtag's postings are spread across every time-based shard</td><td>High — all postings for a popular term live on ONE shard (hotspot)</td></tr>
+          <tr><td>Multi-term (AND) queries</td><td>Cheap — intersection happens locally within each shard</td><td>Expensive — must ship full posting lists across the network to intersect</td></tr>
+          <tr><td>Adding new documents</td><td>Trivial — append to the current time segment</td><td>Requires updating potentially many shards (one per term in the new doc)</td></tr>
+          <tr><td>Used by</td><td>Elasticsearch/Solr Cloud, Twitter's real search engine (Earlybird), most production full-text search</td><td>Rare in practice at this scale; occasionally used for small, static, read-only corpora</td></tr>
+        </tbody>
+      </table>
+      <blockquote>💡 <strong>Interview answer:</strong> document-based partitioning wins for tweet search specifically because it eliminates hot-key risk on trending terms (Lesson 1's "10–50× spike on one hashtag" scenario) and keeps multi-term intersection local to each shard.</blockquote>
+
+      <h4>4.1 Time-Based Segments — Combining Partitioning with Recency</h4>
+      <p>Given that search is recency-biased (Lesson 1: ~90% of queries hit the last 30 days), partition documents by <strong>time range</strong> rather than a plain hash of tweet_id. Each segment covers a fixed window (e.g., every few hours), and within a segment, tweets are further hash-distributed across nodes for parallelism.</p>
+      <pre><code>
+Segment layout (newest first):
+  seg_2026-09-05_18h  (hot, in-memory, still being written)
+  seg_2026-09-05_12h  (hot, in-memory, immutable)
+  seg_2026-09-04_*    (warm, SSD)
+  ...
+  seg_2024-09_*        (cold, SSD/object storage, merged into large monthly blocks)
+
+// A query for "since:2026-09-01" only fans out to segments overlapping that range —
+// skips 23+ months of cold segments entirely. This is the payoff of time partitioning:
+// it turns "search the whole corpus" into "search the relevant slice" for most queries.
+      </code></pre>
+      <p>Sizing the hot tier (from Lesson 1: ~1TB compressed index for the last 30 days): budget ~32GB of index per node → <strong>~34 shards</strong>, rounded to <strong>36</strong> for even distribution. With 3× replication (Lesson 3), that's ~108 node-processes for the hot tier alone; warm/cold tiers use fewer, larger, SSD-backed nodes since they serve far less traffic.</p>
+
+      <h3>5. Query Execution: Scatter-Gather</h3>
+      <pre><code>
+Query: "system design" #interview since:2026-08-01
+
+1. Query Parser → tokens: ["system", "design"], hashtag: "interview", time range: since 2026-08-01
+2. Router determines which time segments overlap the range → say, 40 shards (hot + some warm)
+3. FAN OUT: send the parsed query to all 40 shards IN PARALLEL
+     each shard:
+       - looks up posting lists for "system", "design", "#interview" locally
+       - intersects/unions per query semantics
+       - scores matches (BM25 + recency decay + engagement — Lesson 1 §3)
+       - returns its local top-K (e.g., top 50) with scores
+4. MERGE at the aggregator: combine 40 × top-50 lists, re-sort globally, take top 20
+5. Return page 1 + opaque cursor for pagination
+
+// LATENCY: total query time ≈ max(shard latencies) + merge overhead — NOT the sum.
+// Fanning out to 40 shards in parallel costs roughly the same as querying 1 shard,
+// PROVIDED no individual shard is a straggler (that risk is addressed in Lesson 3
+// via hedged/backup requests).
+      </code></pre>
+
+      <h3>Key Takeaways</h3>
+      <ul>
+        <li><strong>Delta + varint encoding is why the index is small:</strong> ~4 bytes/posting instead of 8-16, because doc IDs within a time-partitioned segment cluster tightly.</li>
+        <li><strong>Document-based partitioning beats term-based for this problem:</strong> it avoids hotspotting on trending terms and keeps multi-term intersection local to each shard.</li>
+        <li><strong>Time-partitioned segments give you a "free" query optimization:</strong> date-ranged and recency-biased queries skip entire cold segments instead of scanning the full 2-year corpus.</li>
+        <li><strong>Scatter-gather latency is bounded by the slowest shard, not the shard count</strong> — this is exactly why tail latency (Lesson 3) matters more than average latency at this fan-out width.</li>
+      </ul>
+
+      <h3>Interview Tips</h3>
+      <ul>
+        <li><strong>Draw the posting list example with real numbers</strong> (doc IDs → deltas → varint bytes) rather than describing compression abstractly — it's a concrete, memorable artifact.</li>
+        <li><strong>Justify document-based over term-based explicitly</strong> by naming the hot-key failure mode it avoids — this ties directly back to the "trending hashtag" scenario from the requirements lesson.</li>
+        <li><strong>Mention that this mirrors real systems</strong> (Twitter's Earlybird, Elasticsearch/Solr Cloud) — signals you're describing a proven pattern, not inventing one under pressure.</li>
+        <li><strong>Preempt the tail-latency question:</strong> "Fanning out to 40 shards means my p99 is dominated by the slowest shard — I'd mitigate that with hedged requests," setting up the next deep dive naturally.</li>
+      </ul>
+    </article>
 
     <!-- Mark Complete -->
     <div class="complete-bar">

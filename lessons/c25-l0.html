@@ -489,7 +489,7 @@ body {
         <div class="lesson-meta-item">
           <span class="lesson-type-badge badge-lesson">lesson</span>
         </div>
-        <div class="lesson-meta-item">⏱ 7 min</div>
+        <div class="lesson-meta-item">⏱ 12 min</div>
         <div class="lesson-meta-item">📖 Chapter 25, Lesson 1</div>
       </div>
     </div>
@@ -498,9 +498,10 @@ body {
     <div class="objectives">
       <h3>🎯 Learning Objectives</h3>
       <ul>
-                <li>Understand the core concepts of: Requirements &amp; Storage Estimation</li>
-                <li>Identify key tradeoffs and design decisions</li>
-                <li>Apply this knowledge in a system design interview</li>
+                <li>Scope functional requirements for tweet search — keyword/phrase/hashtag/user search with relevance+recency ranking and near-real-time indexing — distinct from a general web crawler-based search engine</li>
+                <li>Derive read and write QPS from Twitter-scale numbers (250M DAU, 500M tweets/day, 2B searches/day) including peak multipliers</li>
+                <li>Estimate inverted index storage size (raw corpus vs. compressed postings) and size the hot in-memory tier vs. the cold on-disk tier</li>
+                <li>Justify an eventual-consistency, AP-leaning design given the latency and availability targets of a search system</li>
               </ul>
     </div>
 
@@ -508,7 +509,132 @@ body {
 
     <!-- Lesson Body -->
     <article class="lesson-body">
-      <h2>Requirements &amp;amp; Storage Estimation</h2><p>This lesson covers the key concepts, tradeoffs, and interview patterns for <strong>Requirements &amp;amp; Storage Estimation</strong>.</p><blockquote>Content for this lesson is being prepared. Check back soon!</blockquote><h2>Key Takeaways</h2><ul><li>Always clarify requirements before designing</li><li>Consider scale, availability, and consistency tradeoffs</li><li>Justify your technology choices with concrete reasoning</li><li>Know when to use SQL vs NoSQL, cache vs no cache</li></ul><h2>Interview Tips</h2><ul><li>Draw the architecture diagram first, then explain components</li><li>Think out loud — interviewers value your reasoning process</li><li>Acknowledge what you don&#039;t know and explain how you&#039;d find out</li><li>Ask clarifying questions: read vs write heavy? consistency requirements?</li></ul>    </article>
+      <h2>Requirements &amp; Storage Estimation</h2>
+
+      <h3>1. Clarifying Questions</h3>
+      <p>"Search" is deceptively broad. Twitter search is <strong>not</strong> a general web search engine — the corpus is short, high-velocity, structured posts rather than crawled web pages. Ask these before drawing anything:</p>
+      <table>
+        <thead><tr><th>Question</th><th>Why It Matters</th><th>Typical Answer</th></tr></thead>
+        <tbody>
+          <tr><td>Full-text search over ALL tweets ever posted, or recent tweets only?</td><td>Determines index retention. Twitter's default search is recency-biased; "Advanced Search" covers full history. Retention drives storage cost directly.</td><td>Full 2-year history is searchable, but ranking and caching are biased toward the last 30 days</td></tr>
+          <tr><td>Do we need exact phrase / quoted-string search?</td><td>Phrase queries require storing term <em>positions</em> in the index (2–4× larger postings). Keyword-OR queries only need doc IDs.</td><td>Yes — quoted phrase search is a common feature</td></tr>
+          <tr><td>Is ranking pure relevance, or relevance blended with recency/engagement?</td><td>Classic IR scoring (TF-IDF/BM25) alone would surface a 3-year-old viral tweet over breaking news. Twitter search must weight recency and engagement heavily.</td><td>Blend: BM25 relevance score + exponential recency decay + engagement (likes/retweets)</td></tr>
+          <tr><td>How fresh must results be after a tweet is posted?</td><td>Drives whether indexing can be a batch job (minutes) or must be a streaming pipeline (seconds).</td><td>New tweets searchable within ~1–5 seconds</td></tr>
+          <tr><td>Do deleted or moderated tweets need to disappear from search immediately?</td><td>A deleted tweet still appearing in search results after removal is a privacy/compliance incident, not just a staleness quirk.</td><td>Yes — deletion must be reflected within ~1 second, even if physical index cleanup lags</td></tr>
+          <tr><td>What's the read:write ratio?</td><td>A search-heavy workload justifies optimizing for query fan-out and caching over raw write throughput.</td><td>~4:1 — searches significantly outnumber tweets posted</td></tr>
+        </tbody>
+      </table>
+
+      <h3>2. Functional Requirements</h3>
+      <ul>
+        <li><strong>Keyword / phrase search:</strong> Match one or more terms, including quoted exact phrases, across tweet text.</li>
+        <li><strong>Structured filters:</strong> <code>from:handle</code>, <code>#hashtag</code>, <code>since:</code>/<code>until:</code> date range, language.</li>
+        <li><strong>Relevance + recency ranking:</strong> Results are not purely chronological (like a timeline) nor purely relevance-scored (like classic web search) — they blend both, plus engagement signals.</li>
+        <li><strong>Near-real-time indexing:</strong> A tweet must become searchable within a few seconds of being posted.</li>
+        <li><strong>Deletion propagation:</strong> Deleted/moderated tweets must stop appearing in results almost immediately, even before the index is physically compacted.</li>
+        <li><strong>Pagination:</strong> Cursor-based pagination through result pages, not offset-based (offsets drift under a constantly-growing corpus).</li>
+      </ul>
+      <p><em>Out of scope for this chapter:</em> autocomplete/typeahead, semantic/vector search, image/media content search — each is its own design problem.</p>
+
+      <h3>3. Non-Functional Requirements</h3>
+      <table>
+        <thead><tr><th>Property</th><th>Target</th><th>Rationale</th></tr></thead>
+        <tbody>
+          <tr><td>Availability</td><td>99.99%</td><td>Search is a primary product surface; outages are highly visible</td></tr>
+          <tr><td>Search latency</td><td>&lt; 200ms p99</td><td>Query touches many shards (Lesson 2) and runs a relevance model — tighter than a simple key lookup, looser than a cache hit</td></tr>
+          <tr><td>Indexing lag</td><td>&lt; 5s from tweet creation to searchable</td><td>Users expect their own tweet to be findable almost instantly</td></tr>
+          <tr><td>Consistency</td><td>Eventual (AP-leaning)</td><td>A few seconds of staleness across replicas is acceptable; refusing to serve search results is not</td></tr>
+          <tr><td>Traffic shape</td><td>Highly bursty — 10–50× spikes on specific terms during breaking news</td><td>Unlike steady-state APIs, search traffic concentrates on a handful of hot terms during real-world events</td></tr>
+        </tbody>
+      </table>
+
+      <h3>4. Traffic Estimation (QPS)</h3>
+      <p>Assume Twitter-like scale: 250M daily active users, 500M tweets posted/day, 2B searches/day (people search far more than they post).</p>
+      <pre><code>
+// WRITE PATH (tweet ingestion → indexing pipeline)
+500,000,000 tweets/day ÷ 86,400 s/day  ≈ 5,787 tweets/sec (avg)
+Peak (3× avg, breaking news)           ≈ 17,361 tweets/sec
+
+// READ PATH (search queries)
+2,000,000,000 searches/day ÷ 86,400 s/day ≈ 23,148 searches/sec (avg)
+Peak (3× avg)                              ≈ 69,444 searches/sec
+
+// Read:Write ratio ≈ 70,000 : 17,000 ≈ 4:1
+// → optimize for read fan-out and caching; writes are the smaller problem
+      </code></pre>
+      <blockquote>💡 <strong>Note the asymmetry with hot keys:</strong> the 3× multiplier above describes <em>overall system</em> peak. A single trending hashtag can see 10–50× its normal query volume within minutes — that's a hot-partition problem, not a global-capacity problem, and it's addressed by sharding strategy (Lesson 2), not by over-provisioning the whole cluster.</blockquote>
+
+      <h3>5. Storage Estimation</h3>
+      <p>Average tweet: ~100 bytes of text (well under the 280-char cap) + ~200 bytes of metadata (tweet_id, user_id, timestamp, reply/quote refs, hashtag/mention arrays, language tag) ≈ <strong>300 bytes raw</strong> per tweet. Media is stored separately in blob storage/CDN and is out of scope here.</p>
+      <pre><code>
+// RAW CORPUS (2-year retention)
+500M tweets/day × 300 bytes            = 150 GB/day
+150 GB/day × 730 days (2 yr)           ≈ 110 TB raw text + metadata
+
+// TOTAL DOCUMENTS TO INDEX (2-year corpus)
+500M tweets/day × 730 days             = 365 billion tweets
+
+// INVERTED INDEX SIZE (compressed postings — see Lesson 2 for compression scheme)
+~18 indexed terms/tweet (post-tokenization, incl. hashtags/mentions)
+~4 bytes/posting (delta-encoded doc ID + varint + position, compressed)
+365B tweets × 18 terms × 4 bytes       ≈ 26.3 TB compressed index (single copy)
+
+// WITH 3× REPLICATION (fault tolerance — Lesson 3)
+26.3 TB × 3                            ≈ 79 TB total physical index storage
+
+// HOT TIER — last 30 days (most search traffic is recency-biased)
+500M/day × 30 days                     = 15 billion tweets
+15B × 18 × 4 bytes                     ≈ 1.08 TB (single copy) → ~3.2 TB w/ 3× replication
+// Fits comfortably in memory across a modest cluster (~30–40 nodes, 96GB RAM each)
+      </code></pre>
+      <table>
+        <thead><tr><th>Tier</th><th>Data Age</th><th>Storage Medium</th><th>Query Volume Served</th></tr></thead>
+        <tbody>
+          <tr><td>Hot</td><td>Last 30 days</td><td>In-memory (RAM-resident index segments)</td><td>~90% of searches (recency-biased)</td></tr>
+          <tr><td>Warm</td><td>30 days – 6 months</td><td>SSD-backed</td><td>~8% of searches</td></tr>
+          <tr><td>Cold</td><td>6 months – 2 years</td><td>SSD/object storage, larger merged segments</td><td>~2% of searches (advanced search, date-ranged)</td></tr>
+        </tbody>
+      </table>
+
+      <h3>6. API Design</h3>
+      <pre><code>
+GET /v1/search/tweets
+    ?q={query}              // keyword(s), supports quoted phrases
+    &amp;from={handle}          // optional: filter by author
+    &amp;since={date}&amp;until={date} // optional: date range
+    &amp;lang={code}             // optional: language filter
+    &amp;cursor={token}          // pagination cursor (opaque, not an offset)
+    &amp;limit=20
+
+Response 200:
+{
+  "tweets": [
+    { "id": "...", "user": "...", "text": "...", "created_at": "...", "score": 0.87 }
+  ],
+  "next_cursor": "..."
+}
+
+// Write path is internal, not client-facing:
+// Tweet Created event → Kafka topic "tweet-events" → Indexing Service (Lesson 2)
+      </code></pre>
+
+      <h3>Key Takeaways</h3>
+      <ul>
+        <li><strong>This is not web search:</strong> short, structured, high-velocity documents with a recency-biased ranking function, not a crawled corpus with PageRank-style relevance.</li>
+        <li><strong>Reads dominate writes ~4:1</strong> — 70K peak searches/sec vs. 17K peak tweets/sec. Design for read fan-out and caching first.</li>
+        <li><strong>The index is ~24% the size of the raw corpus</strong> (26.3TB vs. 110TB) thanks to delta encoding and varint compression of posting lists.</li>
+        <li><strong>Hot/warm/cold tiering matters more than total size:</strong> the last 30 days (1TB) must be memory-resident; the other 25TB can live on cheaper, slower storage.</li>
+        <li><strong>Eventual consistency is acceptable for new tweets, but not for deletions</strong> — moderation takedowns need a fast path, addressed in Lesson 3.</li>
+      </ul>
+
+      <h3>Interview Tips</h3>
+      <ul>
+        <li><strong>State the recency-vs-relevance tension explicitly:</strong> "Pure BM25 relevance would surface old viral tweets over breaking news — I'll blend relevance with a recency decay and engagement signal." This is the single most distinguishing insight for this problem.</li>
+        <li><strong>Do the arithmetic out loud:</strong> tweets/day → tweets/sec → peak QPS → bytes/tweet → total corpus size → compressed index size. Interviewers are grading the process, not just the final number.</li>
+        <li><strong>Call out the hot-key problem early:</strong> a trending hashtag isn't a "the whole system got 3× busier" problem — it's a single-partition problem, which foreshadows the sharding deep dive and shows systems-level thinking.</li>
+        <li><strong>Separate "index" from "source of truth":</strong> the index is a derived, rebuildable projection over the durably-stored tweet corpus — this framing pays off directly in the fault-tolerance discussion.</li>
+      </ul>
+    </article>
 
     <!-- Mark Complete -->
     <div class="complete-bar">

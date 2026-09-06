@@ -489,7 +489,7 @@ body {
         <div class="lesson-meta-item">
           <span class="lesson-type-badge badge-lesson">lesson</span>
         </div>
-        <div class="lesson-meta-item">⏱ 8 min</div>
+        <div class="lesson-meta-item">⏱ 14 min</div>
         <div class="lesson-meta-item">📖 Chapter 25, Lesson 3</div>
       </div>
     </div>
@@ -498,9 +498,10 @@ body {
     <div class="objectives">
       <h3>🎯 Learning Objectives</h3>
       <ul>
-                <li>Understand the core concepts of: Deep Dive — Fault Tolerance &amp; Replication</li>
-                <li>Identify key tradeoffs and design decisions</li>
-                <li>Apply this knowledge in a system design interview</li>
+                <li>Design leader-follower replication per shard and reason about failure detection and automatic failover</li>
+                <li>Apply hedged (backup) requests to bound tail latency in a wide scatter-gather query, with the underlying math</li>
+                <li>Design index durability and rebuild via Kafka replay + periodic snapshotting, treating the index as a rebuildable projection over a separately-stored source of truth</li>
+                <li>Handle the deletion/consistency exception: fast tombstones for moderation takedowns vs. eventual consistency for new tweets</li>
               </ul>
     </div>
 
@@ -508,7 +509,129 @@ body {
 
     <!-- Lesson Body -->
     <article class="lesson-body">
-      <h2>Deep Dive — Fault Tolerance &amp;amp; Replication</h2><p>This lesson covers the key concepts, tradeoffs, and interview patterns for <strong>Deep Dive — Fault Tolerance &amp;amp; Replication</strong>.</p><blockquote>Content for this lesson is being prepared. Check back soon!</blockquote><h2>Key Takeaways</h2><ul><li>Always clarify requirements before designing</li><li>Consider scale, availability, and consistency tradeoffs</li><li>Justify your technology choices with concrete reasoning</li><li>Know when to use SQL vs NoSQL, cache vs no cache</li></ul><h2>Interview Tips</h2><ul><li>Draw the architecture diagram first, then explain components</li><li>Think out loud — interviewers value your reasoning process</li><li>Acknowledge what you don&#039;t know and explain how you&#039;d find out</li><li>Ask clarifying questions: read vs write heavy? consistency requirements?</li></ul>    </article>
+      <h2>Deep Dive — Fault Tolerance &amp; Replication</h2>
+
+      <h3>1. Replication Topology</h3>
+      <p>Each shard (time segment, Lesson 2) is replicated across N nodes — typically 3 — using leader-follower replication. Since this workload is overwhelmingly read-heavy (Lesson 1: ~4:1 read:write), read scaling matters more than write coordination.</p>
+      <pre><code>
+Shard "seg_2026-09-05_18h" — 3 replicas:
+  Leader    (node A) — receives index writes from the Kafka consumer, replicates to followers
+  Follower  (node B) — serves reads, applies leader's replication stream asynchronously
+  Follower  (node C) — serves reads, applies leader's replication stream asynchronously
+
+// Writes:  Kafka consumer → Leader only → async replicate → Followers
+// Reads:   Query router load-balances across ALL 3 replicas (leader + followers)
+// This triples read capacity per shard vs. a single-writer-single-reader design
+      </code></pre>
+      <p>Because indexing writes are async-replicated, a follower can lag behind the leader by up to a few seconds — this is exactly the eventual-consistency bound accepted for new tweets in Lesson 1. A shard coordinator (e.g., etcd/ZooKeeper) tracks the current shard→node mapping and leader identity for the query router.</p>
+
+      <h3>2. Failure Detection &amp; Failover</h3>
+      <pre><code>
+Coordinator (etcd/ZooKeeper) maintains per-shard leases with heartbeats (e.g., every 2s)
+
+If Leader misses N consecutive heartbeats (e.g., 3 × 2s = 6s):
+  1. Coordinator marks Leader as suspected-down
+  2. Promotes the most caught-up Follower (highest replicated Kafka offset) to Leader
+  3. Kafka consumer group rebalances: new Leader resumes consuming from its last
+     committed offset — no data loss, since Kafka retains "tweet-events" for 7 days
+  4. Query router's shard map is updated; in-flight reads to the old leader retry
+     against the newly-promoted leader
+
+// Failover window: ~6-10s of write unavailability for that ONE shard.
+// Reads are UNAFFECTED — followers keep serving stale-but-available results throughout.
+      </code></pre>
+
+      <h3>3. Tail Latency: Hedged (Backup) Requests</h3>
+      <p>Lesson 2 noted that a scatter-gather query's latency is bounded by its <em>slowest</em> shard. At a 40-shard fan-out, even a low per-shard tail probability compounds:</p>
+      <pre><code>
+// Suppose each shard replica: p50 = 5ms, p99 = 80ms (GC pause / disk stall / page fault)
+// Probability at least one of 40 independent shards hits its p99 tail:
+P(at least one slow) = 1 - (0.99)^40 ≈ 1 - 0.669 ≈ 33%
+
+// So roughly 1 in 3 queries gets dragged to ~80ms+ by a single unlucky shard,
+// even though 99% of individual shard calls are fast. This is the classic
+// "long tail at scale" problem (Dean &amp; Barroso).
+
+// MITIGATION: hedged request. Send the query to the primary replica; if no
+// response within a short threshold (e.g., 10ms, just above p50), fire the
+// SAME query to a second replica of that shard. Take whichever responds first,
+// cancel the other.
+
+P(both primary AND hedge replica are simultaneously slow)
+   ≈ P(slow)^2  (if failures are roughly independent — different node, different GC cycle)
+   ≈ (0.01)^2 = 0.0001 = 0.01%
+
+// Net effect: a ~33% chance of hitting an 80ms+ tail on ANY given query drops to
+// a ~0.01% chance of the hedge ALSO being slow — the effective p99 collapses
+// toward p50 + a small fixed overhead (the 10ms hedge threshold).
+      </code></pre>
+      <blockquote>💡 <strong>Cost tradeoff:</strong> hedging trades a small amount of extra load (duplicate requests only for the slow tail, typically 1-2% of traffic) for a large tail-latency win. Only hedge after the threshold fires — hedging every request from time zero would ~2× total cluster load for no benefit.</blockquote>
+
+      <h3>4. Partial Results &amp; Graceful Degradation</h3>
+      <p>If a shard is fully unavailable (not just slow — e.g., mid-failover per §2), the aggregator should not fail the entire query. Per Lesson 1's AP-leaning NFR, availability beats completeness for search:</p>
+      <pre><code>
+Aggregator collects responses from 40 shards, with a fixed query deadline (e.g., 150ms):
+  - 39 shards respond in time → merge their results, note 1 shard as "degraded"
+  - Return results + a soft flag (not surfaced to the end user, but logged/monitored)
+  - NEVER block the whole response waiting for 1 unavailable shard out of 40
+    (losing ~2.5% of the corpus for one page load is an acceptable tradeoff
+     for a search product; it is NOT acceptable for, say, a bank balance)
+      </code></pre>
+
+      <h3>5. Index Durability &amp; Rebuild</h3>
+      <p>Treat the index as a <strong>derived, rebuildable projection</strong> over the durably-stored tweet corpus (a separate source-of-truth datastore, out of scope here) — this framing is what makes the rest of this section straightforward.</p>
+      <pre><code>
+Recovery path when a shard replica is lost (disk failure, node death):
+
+1. Bootstrap from the latest SNAPSHOT of that shard's on-disk segments,
+   stored durably in blob storage (e.g., S3), taken every 1-6 hours.
+2. Replay the Kafka "tweet-events" topic from the snapshot's recorded offset
+   forward to "now" — only a few hours of events, not the full 365B-tweet history.
+3. Once caught up, register as a healthy follower with the coordinator (§2).
+
+// DISASTER FALLBACK: if the outage exceeds Kafka's 7-day retention window
+// (e.g., an extended multi-AZ outage), the only remaining path is a FULL
+// reindex from the source-of-truth tweet store — expensive (hours, reprocessing
+// all 365B tweets from Lesson 1) and why snapshot+replay is the PRIMARY recovery
+// path, with full reindex as a rare, monitored, alerting-triggered escape hatch.
+      </code></pre>
+
+      <h3>6. The Deletion Consistency Exception</h3>
+      <p>New tweets tolerate a few seconds of eventual consistency across replicas (Lesson 1). Deletions and moderation takedowns do not — a removed tweet resurfacing in search is a compliance incident, not a UX nitpick.</p>
+      <pre><code>
+Delete event arrives:
+  1. FAST PATH (synchronous, sub-second): write doc_id to a small, globally-
+     replicated tombstone set (e.g., Redis, short TTL matching max index lag).
+     Every query response is filtered against this set before returning to
+     the user — even if the underlying posting lists haven't been touched yet.
+  2. SLOW PATH (async, follows normal indexing pipeline): the doc_id is
+     physically removed from posting lists during the next segment compaction
+     (Lesson 2 §2) — reclaims storage, but is not on the user-facing critical path.
+
+// This decouples "hidden from search" (must be near-instant) from
+// "physically purged from disk" (can lag by minutes/hours) — the same
+// pattern as tombstones in any LSM-based storage engine.
+      </code></pre>
+
+      <h3>7. Multi-Region Disaster Recovery</h3>
+      <p>The "tweet-events" Kafka topic is replicated cross-region (e.g., via MirrorMaker). Each region's index cluster independently consumes its own mirrored copy and builds its own index — avoiding synchronous cross-region replication on the write hot path. A GeoDNS/Anycast query router directs users to their nearest healthy region and fails over entirely to another region if a region's health checks fail.</p>
+
+      <h3>Key Takeaways</h3>
+      <ul>
+        <li><strong>Leader-follower replication triples read capacity per shard</strong> — the natural fit for a ~4:1 read-heavy workload, with async replication accepting the eventual-consistency bound already established for new tweets.</li>
+        <li><strong>Hedged requests turn a 33% chance of an 80ms+ tail into a ~0.01% chance</strong> by firing a duplicate request to a second replica after a short threshold — the standard fix for scatter-gather tail latency at width.</li>
+        <li><strong>The index is a rebuildable projection, not a source of truth</strong> — recovery is snapshot + Kafka replay (hours→minutes of catch-up), with full reindex from the tweet store as a rare disaster fallback.</li>
+        <li><strong>Deletions need a fast tombstone path</strong> separate from the normal async indexing pipeline — the one place this system can't accept its default eventual-consistency SLA.</li>
+      </ul>
+
+      <h3>Interview Tips</h3>
+      <ul>
+        <li><strong>Name-drop "the tail at scale" explicitly</strong> when discussing hedged requests — it signals you know this is a well-studied, named problem (Dean &amp; Barroso, Google), not an ad-hoc fix.</li>
+        <li><strong>Do the tail-latency math on the whiteboard:</strong> P(≥1 of 40 shards slow) ≈ 1-(0.99)^40 ≈ 33% → P(both hedge replicas slow) ≈ 0.01%. Concrete numbers beat "hedging helps with tail latency."</li>
+        <li><strong>Distinguish "index" from "source of truth" early</strong> — it's the single framing that makes durability, rebuild, and disaster recovery all fall out naturally instead of needing separate ad-hoc mechanisms.</li>
+        <li><strong>Flag the deletion exception yourself</strong> before the interviewer asks — proactively noting "eventual consistency is fine for new tweets, but deletions need a synchronous tombstone" shows you're not applying one policy blindly everywhere.</li>
+      </ul>
+    </article>
 
     <!-- Mark Complete -->
     <div class="complete-bar">

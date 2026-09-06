@@ -494,7 +494,7 @@ body {
         <div class="lesson-meta-item">
           <span class="lesson-type-badge badge-lesson">lesson</span>
         </div>
-        <div class="lesson-meta-item">⏱ 7 min</div>
+        <div class="lesson-meta-item">⏱ 12 min</div>
         <div class="lesson-meta-item">📖 Chapter 26, Lesson 1</div>
       </div>
     </div>
@@ -503,9 +503,10 @@ body {
     <div class="objectives">
       <h3>🎯 Learning Objectives</h3>
       <ul>
-                <li>Understand the core concepts of: Requirements &amp; Estimations</li>
-                <li>Identify key tradeoffs and design decisions</li>
-                <li>Apply this knowledge in a system design interview</li>
+                <li>Scope a web crawler with clarifying questions (crawl breadth, freshness, content types, politeness)</li>
+                <li>Derive crawl throughput and storage needs from a 1B-pages/month target</li>
+                <li>Size the URL universe your dedup layer must track (discovered vs. crawled)</li>
+                <li>Justify a BFS-first, eventually-consistent design over strict per-page freshness</li>
               </ul>
     </div>
 
@@ -513,7 +514,116 @@ body {
 
     <!-- Lesson Body -->
     <article class="lesson-body">
-      <h2>Requirements &amp;amp; Estimations</h2><p>This lesson covers the key concepts, tradeoffs, and interview patterns for <strong>Requirements &amp;amp; Estimations</strong>.</p><blockquote>Content for this lesson is being prepared. Check back soon!</blockquote><h2>Key Takeaways</h2><ul><li>Always clarify requirements before designing</li><li>Consider scale, availability, and consistency tradeoffs</li><li>Justify your technology choices with concrete reasoning</li><li>Know when to use SQL vs NoSQL, cache vs no cache</li></ul><h2>Interview Tips</h2><ul><li>Draw the architecture diagram first, then explain components</li><li>Think out loud — interviewers value your reasoning process</li><li>Acknowledge what you don&#039;t know and explain how you&#039;d find out</li><li>Ask clarifying questions: read vs write heavy? consistency requirements?</li></ul>    </article>
+      <h2>Requirements &amp; Estimations</h2>
+      <p>A web crawler (Googlebot, Bingbot) systematically discovers and downloads pages by following hyperlinks, starting from a set of seed URLs. The hard part isn't fetching one page — it's fetching <strong>billions</strong> of pages without hammering any single site, getting stuck in infinite link structures, or re-downloading content you already have.</p>
+
+      <h3>1. Clarifying Questions</h3>
+      <table>
+        <thead><tr><th>Question</th><th>Why it matters</th></tr></thead>
+        <tbody>
+          <tr><td>General-purpose crawl or a focused/vertical crawl (e.g., only news sites)?</td><td>Determines seed set size, prioritization strategy, and whether we need topic classifiers</td></tr>
+          <tr><td>How fresh must content be? (recrawl every day / week / month?)</td><td>Drives crawl throughput and whether we need adaptive per-page recrawl scheduling</td></tr>
+          <tr><td>Do we need to render JavaScript (SPA pages) or is raw HTML enough?</td><td>Headless-browser rendering is 10-100× more expensive per page than a raw HTTP GET</td></tr>
+          <tr><td>Must we respect <code>robots.txt</code> and <code>Crawl-delay</code>?</td><td>Legal/ethical requirement for any production crawler — assume yes</td></tr>
+          <tr><td>What do we store — raw HTML, extracted text, or both?</td><td>Directly changes storage estimate; assume raw HTML + extracted metadata</td></tr>
+          <tr><td>Do we need near-duplicate detection across mirrors/syndicated content?</td><td>Adds a content-fingerprinting stage (covered in Lesson 4)</td></tr>
+        </tbody>
+      </table>
+      <p>For this design: general-purpose crawl, monthly full-refresh freshness target, raw-HTML-only fetch (no JS rendering), strict robots.txt compliance, and near-duplicate detection in scope.</p>
+
+      <h3>2. Functional Requirements</h3>
+      <ul>
+        <li>Given a set of seed URLs, discover and fetch new pages by following extracted links</li>
+        <li>Respect each site's <code>robots.txt</code> and any <code>Crawl-delay</code> directive</li>
+        <li>Avoid fetching a URL — or content — more than once (URL dedup + content dedup)</li>
+        <li>Re-crawl pages periodically based on an observed/estimated change frequency</li>
+        <li>Extract and store page content, metadata, and outbound links for downstream indexing</li>
+        <li>Handle malformed HTML, redirects, timeouts, and non-HTML content types gracefully</li>
+      </ul>
+
+      <h3>3. Non-Functional Requirements</h3>
+      <table>
+        <thead><tr><th>Attribute</th><th>Target</th></tr></thead>
+        <tbody>
+          <tr><td>Scalability</td><td>Sustain a crawl of 1B+ pages/month; horizontally scale fetcher fleet</td></tr>
+          <tr><td>Politeness</td><td>Never overload a single host — enforce a min per-host delay independent of overall system load</td></tr>
+          <tr><td>Robustness</td><td>Tolerate malformed pages, dead links, crawler traps, and slow/unresponsive servers without stalling the pipeline</td></tr>
+          <tr><td>Extensibility</td><td>New content types (PDF, sitemap XML) and new prioritization signals pluggable without a redesign</td></tr>
+          <tr><td>Consistency</td><td>AP-leaning — a page being briefly stale or a URL being fetched twice under a race is acceptable; losing track of the frontier is not</td></tr>
+        </tbody>
+      </table>
+
+      <h3>4. Traffic Estimation</h3>
+      <pre><code>Target: full refresh of 1,000,000,000 (1B) pages every 30 days
+
+Average crawl rate:
+  1,000,000,000 pages / (30 days × 86,400 s/day)
+  = 1,000,000,000 / 2,592,000 s
+  ≈ 386 pages/sec (avg)
+
+Peak crawl rate (3× avg — crawler fleet ramps during off-peak windows,
+bursts against freshly-discovered link batches):
+  386 × 3 ≈ 1,157 pages/sec (peak)
+
+Link discovery rate (avg ~30 outbound links/page, ~90% already-seen):
+  386 pages/sec × 30 links/page × 10% new ≈ 1,158 new URLs/sec
+  → discovered-URL universe grows far faster than the crawled-page count;
+    over time the crawler will have SEEN ~10B+ distinct URLs even though
+    it only actively crawls ~1B/month</code></pre>
+      <blockquote>💡 <strong>Interview signal:</strong> stating explicitly that "discovered URLs" ≫ "crawled pages" is what leads into designing a URL-seen filter (Bloom filter, Lesson 4) sized for 10B+ entries, not 1B.</blockquote>
+
+      <h3>5. Storage Estimation</h3>
+      <pre><code>Assume average page size (HTML only, no embedded media): 500 KB
+
+Raw HTML per crawl cycle (30 days):
+  1,000,000,000 pages × 500 KB ≈ 500,000,000,000 KB
+  = 500 TB / month
+
+With 3× replication for durability:
+  500 TB × 3 = 1.5 PB / month of physical storage
+
+Metadata per page (~500 bytes: URL, fetch timestamp, content hash,
+HTTP status, outbound link list pointer, next-crawl-time):
+  1B pages × 500 bytes = 500 GB metadata (fits a distributed KV/wide-column store)
+
+URL frontier + seen-set working set (avg URL ~100 bytes):
+  10B discovered URLs × 100 bytes = 1 TB just for raw URL strings
+  (compressed further once hashed — see Lesson 4's Bloom filter sizing)</code></pre>
+      <table>
+        <thead><tr><th>Tier</th><th>Contents</th><th>Store</th></tr></thead>
+        <tbody>
+          <tr><td>Hot</td><td>In-flight frontier, per-host queues, robots.txt cache</td><td>In-memory (Redis/custom), sharded by host</td></tr>
+          <tr><td>Warm</td><td>Page metadata, content fingerprints</td><td>Wide-column store (Bigtable/Cassandra-style), sharded by URL hash</td></tr>
+          <tr><td>Cold</td><td>Raw HTML blobs</td><td>Blob storage (S3-like), keyed by content hash</td></tr>
+        </tbody>
+      </table>
+
+      <h3>6. Interfaces (Internal)</h3>
+      <p>A crawler has no public API — its "interface" is the contract between internal components. Sketching this early signals you're thinking in terms of a pipeline, not a monolith:</p>
+      <pre><code>URLFrontier.enqueue(url: string, priority: int) -> void
+URLFrontier.dequeue() -> url: string          // returns only a URL whose host is "ready" (politeness)
+
+Fetcher.fetch(url: string) -> {status, headers, body, fetchTimeMs}
+
+Parser.extract(html: string, baseUrl: string) -> {text, outboundLinks[], contentHash}
+
+URLFilter.shouldCrawl(url: string) -> bool     // dedup + robots.txt + depth/host caps</code></pre>
+
+      <h3>Key Takeaways</h3>
+      <ul>
+        <li>Always separate "discovered URL" volume from "crawled page" volume — the frontier and dedup layer must be sized for the larger number</li>
+        <li>1B pages/month at 500 KB average yields ~386 pages/sec average, ~1,157 peak, and ~1.5 PB/month replicated storage</li>
+        <li>Politeness is a hard non-functional requirement, not an optimization — it shapes the URL Frontier design in Lesson 2</li>
+        <li>AP-leaning consistency is the right call: a crawler tolerates staleness and occasional duplicate fetches far better than it tolerates losing frontier state</li>
+      </ul>
+      <h3>Interview Tips</h3>
+      <ul>
+        <li>Anchor every later design decision (BFS vs DFS, Bloom filter size, queue sharding) back to the numbers you derive here</li>
+        <li>Explicitly separate "URLs we've seen" from "pages we've fetched" early — interviewers probe this distinction</li>
+        <li>State your assumptions (page size, refresh window, link fan-out) out loud before computing — the number matters less than the method</li>
+        <li>Bring up robots.txt/politeness unprompted; it signals real-world crawler experience</li>
+      </ul>
+    </article>
 
     <!-- Mark Complete -->
     <div class="complete-bar">

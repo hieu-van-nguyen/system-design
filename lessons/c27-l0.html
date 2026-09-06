@@ -494,7 +494,7 @@ body {
         <div class="lesson-meta-item">
           <span class="lesson-type-badge badge-lesson">lesson</span>
         </div>
-        <div class="lesson-meta-item">⏱ 7 min</div>
+        <div class="lesson-meta-item">⏱ 13 min</div>
         <div class="lesson-meta-item">📖 Chapter 27, Lesson 1</div>
       </div>
     </div>
@@ -503,9 +503,10 @@ body {
     <div class="objectives">
       <h3>🎯 Learning Objectives</h3>
       <ul>
-                <li>Understand the core concepts of: Requirements &amp; Estimations</li>
-                <li>Identify key tradeoffs and design decisions</li>
-                <li>Apply this knowledge in a system design interview</li>
+                <li>Frame clarifying questions around ranked-vs-chronological feed and read:write ratio</li>
+                <li>Derive feed-read QPS, post-write QPS, and full fan-out write amplification from DAU</li>
+                <li>Size post metadata, media, social graph, and feed-cache storage as separate estimates</li>
+                <li>Justify why the feed cache is disposable while posts and the social graph must be durable</li>
               </ul>
     </div>
 
@@ -513,7 +514,115 @@ body {
 
     <!-- Lesson Body -->
     <article class="lesson-body">
-      <h2>Requirements &amp;amp; Estimations</h2><p>This lesson covers the key concepts, tradeoffs, and interview patterns for <strong>Requirements &amp;amp; Estimations</strong>.</p><blockquote>Content for this lesson is being prepared. Check back soon!</blockquote><h2>Key Takeaways</h2><ul><li>Always clarify requirements before designing</li><li>Consider scale, availability, and consistency tradeoffs</li><li>Justify your technology choices with concrete reasoning</li><li>Know when to use SQL vs NoSQL, cache vs no cache</li></ul><h2>Interview Tips</h2><ul><li>Draw the architecture diagram first, then explain components</li><li>Think out loud — interviewers value your reasoning process</li><li>Acknowledge what you don&#039;t know and explain how you&#039;d find out</li><li>Ask clarifying questions: read vs write heavy? consistency requirements?</li></ul>    </article>
+      <h2>Requirements &amp; Estimations</h2>
+      <p>The Facebook Newsfeed shows each user a personalized, continuously-updating stream of posts from friends, followed Pages, and Groups. The hard part isn't rendering a list of posts — it's deciding <strong>whose posts to fan out, when to compute the feed, and in what order to rank them</strong>, at a scale where a single celebrity account can have 100M+ followers and users expect a fresh feed within seconds of opening the app.</p>
+
+      <h3>1. Clarifying Questions</h3>
+      <table>
+        <thead><tr><th>Question</th><th>Why it matters</th></tr></thead>
+        <tbody>
+          <tr><td>Ranked feed or reverse-chronological?</td><td>Ranked feed needs an ML scoring pipeline (Lesson 4); chronological only needs a merge of timelines</td></tr>
+          <tr><td>What content types appear — text, photo, video, shared links?</td><td>Media-heavy posts push storage/CDN into the design; assume all types, media stored separately from post metadata</td></tr>
+          <tr><td>Do we design for friends only, or also Pages/Groups the user follows?</td><td>Increases the fan-out graph beyond a symmetric friend graph to include one-directional follows</td></tr>
+          <tr><td>How fresh must the feed be after a friend posts?</td><td>Assume "seconds," which rules out fully-batch/offline feed generation</td></tr>
+          <tr><td>Do we need infinite scroll / pagination that's stable while new posts arrive?</td><td>Drives cursor-based pagination instead of offset-based (Lesson 2)</td></tr>
+          <tr><td>Read-heavy or write-heavy system?</td><td>Feed reads vastly outnumber post writes — this ratio drives the pull vs. push decision in Lesson 2</td></tr>
+        </tbody>
+      </table>
+      <p>For this design: ranked feed (with a chronological fallback), all content types, friends + Pages/Groups, feed updates visible within seconds, and stable cursor-based pagination.</p>
+
+      <h3>2. Functional Requirements</h3>
+      <ul>
+        <li>Users can create posts (text, photo, video, link) visible to their friends/followers</li>
+        <li>Users can fetch their personalized feed, paginated, ordered by rank (or recency as fallback)</li>
+        <li>New posts from friends/Pages should appear in the feed within seconds</li>
+        <li>Users can like, comment, and share posts, and those signals feed back into ranking</li>
+        <li>The feed excludes posts the user has already seen or hidden, and respects blocks/privacy settings</li>
+        <li>The system supports both a "top follower count" celebrity account and an average user with ~300 friends</li>
+      </ul>
+
+      <h3>3. Non-Functional Requirements</h3>
+      <table>
+        <thead><tr><th>Attribute</th><th>Target</th></tr></thead>
+        <tbody>
+          <tr><td>Availability</td><td>Favor availability over strict consistency — a slightly stale feed is fine, a feed that fails to load is not</td></tr>
+          <tr><td>Latency</td><td>Feed load p99 &lt; 200ms; new-post-to-friend's-feed visibility within a few seconds</td></tr>
+          <tr><td>Scalability</td><td>Support 1B+ DAU, with feed reads outnumbering post writes by roughly 20:1</td></tr>
+          <tr><td>Consistency</td><td>Eventual consistency for feed content; read-your-own-writes for a user's own post</td></tr>
+          <tr><td>Durability</td><td>Posts and social graph edges must never be lost; the feed cache itself is disposable/rebuildable</td></tr>
+        </tbody>
+      </table>
+      <blockquote>💡 <strong>Interview signal:</strong> Explicitly say "the feed cache is a derived, rebuildable view — the source of truth is the post store and the social graph." This tells the interviewer you understand which data must be durable and which can be treated as an optimization.</blockquote>
+
+      <h3>4. Traffic Estimation</h3>
+      <pre><code>Assumptions:
+  DAU                        = 1,000,000,000  (1B)
+  Avg friends/follows per user = 300
+  Posts created per user/day = 0.5            // most users read far more than they post
+  Feed reads per user/day    = 10              // opening the app / scrolling, refreshes included
+
+Post writes/day  = 1B * 0.5                = 500,000,000 posts/day
+Post writes/sec  = 500M / 86,400            ≈ 5,800 writes/sec (avg)
+
+Feed reads/day   = 1B * 10                 = 10,000,000,000 reads/day (10B)
+Feed reads/sec   = 10B / 86,400             ≈ 116,000 reads/sec (avg)
+Feed reads peak  ≈ 116K * 3 (evening peak)  ≈ 350,000 reads/sec (peak)
+
+Read : Write ratio ≈ 116,000 : 5,800  ≈  20 : 1
+  // Feed reads dominate — this is why we cache aggressively and
+  // precompute feed content instead of joining across the social graph on every read.
+
+Fan-out amplification (if every post were pushed to every follower's feed):
+  Fan-out writes/day = 500M posts * 300 avg friends = 150,000,000,000 (150B)
+  Fan-out writes/sec = 150B / 86,400          ≈ 1,700,000 writes/sec (1.7M/sec)
+  // 1.7M/sec of fan-out work is what makes "push to everyone, always" infeasible
+  // for celebrity accounts — this single number motivates the hybrid model in Lesson 3.</code></pre>
+
+      <h3>5. Storage Estimation</h3>
+      <pre><code>Post metadata (author_id, timestamp, privacy, media refs, counters): ~300 bytes/post
+  500M posts/day * 300 bytes           = 150 GB/day of post metadata
+  Over 5 years: 150 GB * 365 * 5       ≈ 274 TB (metadata only, excluding media blobs)
+
+Media (photo/video), stored in blob storage + CDN, referenced by URL from post metadata:
+  ~60% of posts include media, avg 200 KB (after compression/thumbnailing)
+  500M * 0.6 * 200 KB                 = 60 TB/day of new media
+
+Social graph (friend edges, follow edges): ~1B users * 300 edges * 16 bytes ≈ 4.8 TB total
+  // Small compared to posts/media — but read on every fan-out decision, so it lives
+  // in a low-latency store (Lesson 2), not scanned from a cold data warehouse.
+
+Precomputed feed cache (push model), per active user:
+  Top 500 post IDs + score, 8 bytes each  = 4 KB/user
+  1B DAU * 4 KB                        ≈ 4 TB of hot cache footprint (e.g., in Redis)</code></pre>
+      <blockquote>💡 <strong>Interview signal:</strong> Separating "post metadata" from "media bytes" and "feed cache" into three distinct storage estimates shows the interviewer you're not treating this as one monolithic database — each has different durability, size, and access-pattern requirements.</blockquote>
+
+      <h3>6. Interfaces (Internal)</h3>
+      <table>
+        <thead><tr><th>API</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td><code>createPost(userId, content, mediaRefs, privacy) → postId</code></td><td>Publish a new post; triggers fan-out (Lesson 3)</td></tr>
+          <tr><td><code>getFeed(userId, cursor, pageSize) → posts[], nextCursor</code></td><td>Fetch a page of the user's ranked feed (Lesson 2 covers cursor design)</td></tr>
+          <tr><td><code>getSocialGraph(userId) → friendIds[], followedIds[]</code></td><td>Used by the fan-out worker to determine who receives a post</td></tr>
+          <tr><td><code>recordEngagement(userId, postId, type)</code></td><td>Feeds like/comment/share signals into the ranking feature store (Lesson 4)</td></tr>
+        </tbody>
+      </table>
+
+      <h2>Key Takeaways</h2>
+      <ul>
+        <li>Feed reads (~116K/sec avg, ~350K/sec peak) outnumber post writes (~5,800/sec) by ~20:1 — design for reads first</li>
+        <li>The 1.7M writes/sec full fan-out number is a red flag, not a target — it's the reason a pure push model can't work for celebrity accounts</li>
+        <li>Treat post metadata, media blobs, the social graph, and the feed cache as four separately-sized, separately-durable stores</li>
+        <li>The feed cache is a derived, rebuildable view; the post store and social graph are the durable sources of truth</li>
+        <li>Availability and low latency matter more than strict consistency — a few-second-stale feed is an acceptable tradeoff</li>
+      </ul>
+      <h2>Interview Tips</h2>
+      <ul>
+        <li>Lead with the read:write ratio — it's the single number that justifies every caching/fan-out decision that follows</li>
+        <li>Call out the celebrity-account edge case early; interviewers use it to test whether you'll blindly push-fan-out everything</li>
+        <li>Separate your storage estimate into metadata vs. media vs. cache — don't lump them into one "database size" number</li>
+        <li>State explicitly which data must be durable (posts, graph) vs. which can be lossy/rebuildable (feed cache)</li>
+      </ul>
+    </article>
 
     <!-- Mark Complete -->
     <div class="complete-bar">

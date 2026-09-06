@@ -494,7 +494,7 @@ body {
         <div class="lesson-meta-item">
           <span class="lesson-type-badge badge-lesson">lesson</span>
         </div>
-        <div class="lesson-meta-item">⏱ 10 min</div>
+        <div class="lesson-meta-item">⏱ 14 min</div>
         <div class="lesson-meta-item">📖 Chapter 27, Lesson 2</div>
       </div>
     </div>
@@ -503,9 +503,10 @@ body {
     <div class="objectives">
       <h3>🎯 Learning Objectives</h3>
       <ul>
-                <li>Understand the core concepts of: High-Level Design &amp; Feed Generation</li>
-                <li>Identify key tradeoffs and design decisions</li>
-                <li>Apply this knowledge in a system design interview</li>
+                <li>Lay out the Post/Feed/Social Graph/Ranking service architecture and how data flows between them</li>
+                <li>Compare pull (fan-out-on-read), push (fan-out-on-write), and hybrid feed generation models</li>
+                <li>Design the feed cache as a bounded, per-user sorted set of post references, not full content</li>
+                <li>Implement cursor-based pagination that stays stable as new posts are continuously inserted</li>
               </ul>
     </div>
 
@@ -513,7 +514,104 @@ body {
 
     <!-- Lesson Body -->
     <article class="lesson-body">
-      <h2>High-Level Design &amp;amp; Feed Generation</h2><p>This lesson covers the key concepts, tradeoffs, and interview patterns for <strong>High-Level Design &amp;amp; Feed Generation</strong>.</p><blockquote>Content for this lesson is being prepared. Check back soon!</blockquote><h2>Key Takeaways</h2><ul><li>Always clarify requirements before designing</li><li>Consider scale, availability, and consistency tradeoffs</li><li>Justify your technology choices with concrete reasoning</li><li>Know when to use SQL vs NoSQL, cache vs no cache</li></ul><h2>Interview Tips</h2><ul><li>Draw the architecture diagram first, then explain components</li><li>Think out loud — interviewers value your reasoning process</li><li>Acknowledge what you don&#039;t know and explain how you&#039;d find out</li><li>Ask clarifying questions: read vs write heavy? consistency requirements?</li></ul>    </article>
+      <h2>High-Level Design &amp; Feed Generation</h2>
+      <p>Per Lesson 1's numbers: ~5,800 post writes/sec against ~116K feed reads/sec (avg), ~350K at peak. The high-level design has to answer one core question — <strong>do we compute each user's feed at read time, or precompute it ahead of time?</strong> — and everything else (services, cache shape, pagination) follows from that choice.</p>
+
+      <h3>1. Service Architecture</h3>
+      <pre><code>                         ┌────────────────┐
+   Client (mobile/web) ──▶  API Gateway    │
+                         └───────┬────────┘
+                    ┌────────────┼────────────────┐
+                    ▼            ▼                ▼
+             ┌────────────┐ ┌──────────┐   ┌───────────────┐
+             │ Post       │ │ Feed     │   │ Social Graph  │
+             │ Service    │ │ Service  │◀──│ Service       │
+             └─────┬──────┘ └────┬─────┘   └───────┬───────┘
+                   │             │                 │
+                   ▼             ▼                 ▼
+             ┌──────────┐  ┌───────────┐    ┌──────────────┐
+             │ Post DB  │  │ Feed Cache│    │ Graph Store  │
+             │(source of│  │ (Redis /  │    │ (friend +    │
+             │  truth)  │  │ per-user  │    │  follow      │
+             └────┬─────┘  │ post-ID   │    │  edges)      │
+                  │        │  lists)   │    └──────────────┘
+                  ▼        └─────┬─────┘
+             ┌──────────┐        │
+             │ Message  │        ▼
+             │ Queue    │  ┌───────────┐
+             │(fan-out  │  │ Ranking   │
+             │ jobs)    │  │ Service   │
+             └────┬─────┘  └───────────┘
+                  ▼               ▲
+           ┌──────────────┐       │
+           │ Fan-out       ├───────┘
+           │ Workers (L3)  │
+           └──────────────┘</code></pre>
+      <ul>
+        <li><strong>Post Service</strong> — validates and durably writes new posts; publishes a "post created" event to the queue</li>
+        <li><strong>Social Graph Service</strong> — fast lookup of a user's friends/follows, and (for the celebrity path) their follower count</li>
+        <li><strong>Feed Service</strong> — serves <code>getFeed()</code>; reads from the feed cache, falls back to on-demand generation on a cache miss</li>
+        <li><strong>Ranking Service</strong> — scores candidate posts for a user (Lesson 4); called either at fan-out time or at read time depending on the model below</li>
+      </ul>
+
+      <h3>2. Pull vs. Push vs. Hybrid Feed Generation</h3>
+      <table>
+        <thead><tr><th>Model</th><th>How it works</th><th>Tradeoff</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Pull (fan-out-on-read)</strong></td><td>On <code>getFeed()</code>, fetch the user's friend list, pull their recent posts, merge and rank on the fly</td><td>Cheap writes, but every read does an expensive fan-in across hundreds of friends — read latency scales with friend count, and reads outnumber writes 20:1</td></tr>
+          <tr><td><strong>Push (fan-out-on-write)</strong></td><td>On <code>createPost()</code>, immediately write the post ID into every follower's precomputed feed cache</td><td>Reads become a cheap cache lookup, but a celebrity post triggers millions of fan-out writes (recall: 1.7M writes/sec if applied to <em>every</em> post)</td></tr>
+          <tr><td><strong>Hybrid</strong></td><td>Push for normal users (bounded fan-out); pull-and-merge-at-read-time for celebrity/high-follower accounts</td><td>Best of both — bounds worst-case write amplification while keeping reads cheap for the common case; adds a merge step at read time (Lesson 3)</td></tr>
+        </tbody>
+      </table>
+      <blockquote>💡 <strong>Interview signal:</strong> Don't just say "hybrid" — explain <em>why</em>: pure push breaks on celebrities because fan-out cost scales with follower count, and pure pull breaks because it re-does the same expensive merge on every single read even though most users' friend lists barely change between requests. Hybrid bounds the worst case of each.</blockquote>
+
+      <h3>3. Feed Cache Shape</h3>
+      <p>We chose push as the default, so the feed cache is a precomputed, per-user structure — not the full post content, just enough to render and page through:</p>
+      <pre><code>feed:{userId} → sorted set (Redis ZSET)
+  member = postId
+  score   = rank_score (or timestamp, for chronological fallback)
+
+  // Bounded to top ~500 entries per user (from Lesson 1: 4KB/user, ~4TB total)
+  // Actual post content is fetched separately from the Post DB / a post-content
+  // cache, keyed by postId — the feed cache only stores *references + order*.</code></pre>
+
+      <h3>4. Cursor-Based Pagination</h3>
+      <p>Offset-based pagination (<code>LIMIT 20 OFFSET 40</code>) breaks when new posts are constantly being inserted at the top — a post can shift into a page the user already scrolled past, causing duplicates or skipped posts. Instead, the feed uses a stable cursor:</p>
+      <pre><code>getFeed(userId, cursor=null, pageSize=20):
+  entries = ZREVRANGEBYSCORE feed:{userId}
+              max = cursor ?? +inf
+              min = -inf
+              LIMIT 0 pageSize
+  nextCursor = score of the last entry returned
+  return entries, nextCursor
+
+// Client passes nextCursor back on the following request.
+// Because the cursor is a score (not a row offset), inserting new posts
+// above the cursor never shifts or duplicates entries below it.</code></pre>
+      <blockquote>💡 <strong>Interview signal:</strong> Naming the offset-pagination failure mode explicitly ("a post can shift into an already-scrolled page") shows you've hit this bug before, not just memorized "use cursors."</blockquote>
+
+      <h3>5. Cache Miss / Cold Start Path</h3>
+      <ul>
+        <li>New user or expired cache entry → Feed Service falls back to the pull path: fetch friend list, pull each friend's recent post IDs, merge-sort by score, write the result back into the feed cache</li>
+        <li>This fallback is intentionally the "slow path" — acceptable for rare cold starts, unacceptable as the default for 350K reads/sec at peak</li>
+      </ul>
+
+      <h2>Key Takeaways</h2>
+      <ul>
+        <li>Pull is cheap to write but expensive to read; push is cheap to read but expensive to write — a hybrid bounds both worst cases</li>
+        <li>The feed cache stores ordered post <em>references</em> (post ID + score), not full content — content is fetched separately</li>
+        <li>Cursor-based pagination (score-based) avoids the duplicate/skip bugs that offset-based pagination causes on a constantly-updating feed</li>
+        <li>A cache miss falls back to the same on-demand merge that the pull model does by default — it's a fallback path, not the primary path</li>
+        <li>Every architectural choice here traces back to the 20:1 read:write ratio established in Lesson 1</li>
+      </ul>
+      <h2>Interview Tips</h2>
+      <ul>
+        <li>Draw the service diagram first — Post/Feed/Social Graph/Ranking services plus the queue — then narrate data flow through it</li>
+        <li>Present pull, push, and hybrid as a genuine tradeoff table, not "hybrid is obviously correct" — show you understand what each gives up</li>
+        <li>Mention that the feed cache is bounded (e.g., top 500 posts) — an unbounded cache defeats the purpose of precomputation</li>
+        <li>Be ready to explain the cold-start/cache-miss path — interviewers often probe "what happens for a brand-new user?"</li>
+      </ul>
+    </article>
 
     <!-- Mark Complete -->
     <div class="complete-bar">
